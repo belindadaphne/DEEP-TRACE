@@ -1,0 +1,6 @@
+streamlit
+opencv-python
+torch
+transformers
+albumentations
+tqdm

@@ -6,4 +6,3 @@ deepguard
 ultralytics
 albumentations
 tqdm
-opencv-python-headless

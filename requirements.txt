@@ -4,6 +4,5 @@ torch
 transformers
 Pillow
 deepguard
-ultralytics
 albumentations
 tqdm

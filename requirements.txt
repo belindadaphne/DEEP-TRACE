@@ -1,8 +1,8 @@
 streamlit
-opencv-python-headless
 torch
 transformers
 Pillow
 deepguard
 albumentations
 tqdm
+opencv-python-headless

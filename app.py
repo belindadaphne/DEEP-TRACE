@@ -1,5 +1,4 @@
 import streamlit as st
-# OpenCV is loaded only when video analysis is needed
 import hashlib
 import tempfile
 from pathlib import Path
@@ -189,29 +188,13 @@ st.markdown(
 
 
 # ============================================================
-# MODEL NAMES
+# MODEL
 # ============================================================
 
-VIDEO_MODEL_NAME = (
+MODEL_NAME = (
     "KoreaPeter/"
     "ms-eff-gcvit-deepfake-b0-ff-plus-plus"
 )
-
-IMAGE_MODEL_NAME = "king1oo1/deepfake-model"
-
-
-# ============================================================
-# LOAD VIDEO MODEL
-# ============================================================
-
-@st.cache_resource
-def load_video_model():
-
-    return pipeline(
-        "video-classification",
-        model=VIDEO_MODEL_NAME,
-        trust_remote_code=True
-    )
 
 
 # ============================================================
@@ -223,13 +206,33 @@ def load_image_model():
 
     return pipeline(
         "image-classification",
-        model=IMAGE_MODEL_NAME
+        model=MODEL_NAME,
+        trust_remote_code=True
+    )
+
+
+# ============================================================
+# LOAD VIDEO MODEL
+# ============================================================
+
+@st.cache_resource
+def load_video_model():
+
+    return pipeline(
+        "video-classification",
+        model=MODEL_NAME,
+        trust_remote_code=True
     )
 
 
 # ============================================================
 # SHA256
 # ============================================================
+
+def sha256_bytes(data):
+
+    return hashlib.sha256(data).hexdigest()
+
 
 def sha256_file(path):
 
@@ -247,12 +250,129 @@ def sha256_file(path):
 
 
 # ============================================================
+# NORMALIZE MODEL RESULT
+# ============================================================
+
+def calculate_scores(results):
+
+    """
+    Converts model output into:
+
+        real_score
+        fake_score
+        verdict
+        confidence
+
+    The KoreaPeter model uses:
+
+        real = 0
+        fake = 1
+
+    and returns labels named "real" / "fake".
+    """
+
+    real_score = 0.0
+    fake_score = 0.0
+
+    if results is None:
+        results = []
+
+    # Make sure a single dictionary also works
+    if isinstance(results, dict):
+        results = [results]
+
+    for item in results:
+
+        if not isinstance(item, dict):
+            continue
+
+        label = str(
+            item.get("label", "")
+        ).strip().lower()
+
+        score = float(
+            item.get("score", 0.0)
+        )
+
+        # Exact model labels
+        if label == "real":
+
+            real_score = max(
+                real_score,
+                score
+            )
+
+        elif label == "fake":
+
+            fake_score = max(
+                fake_score,
+                score
+            )
+
+        # Extra protection for LABEL_0 / LABEL_1
+        elif label in ["label_0", "0"]:
+
+            real_score = max(
+                real_score,
+                score
+            )
+
+        elif label in ["label_1", "1"]:
+
+            fake_score = max(
+                fake_score,
+                score
+            )
+
+    # --------------------------------------------------------
+    # FINAL VERDICT
+    # --------------------------------------------------------
+
+    if fake_score > real_score:
+
+        verdict = "DEEPFAKE"
+        confidence = fake_score
+
+    else:
+
+        verdict = "REAL"
+        confidence = real_score
+
+    return {
+        "real_score": real_score,
+        "fake_score": fake_score,
+        "verdict": verdict,
+        "confidence": confidence
+    }
+
+
+# ============================================================
+# IMAGE PREDICTION
+# ============================================================
+
+def run_image_prediction(image):
+
+    detector = load_image_model()
+
+    results = detector(
+        image,
+        top_k=2
+    )
+
+    scores = calculate_scores(results)
+
+    scores["raw_results"] = results
+
+    return scores
+
+
+# ============================================================
 # VIDEO INFORMATION
 # ============================================================
 
 def get_video_info(path):
 
-    # Load OpenCV only when video functionality is used
+    # Import only when video is used
     import cv2
 
     cap = cv2.VideoCapture(path)
@@ -267,23 +387,31 @@ def get_video_info(path):
             "duration": 0
         }
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    fps = cap.get(
+        cv2.CAP_PROP_FPS
+    ) or 0
 
     frames = int(
-        cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        cap.get(
+            cv2.CAP_PROP_FRAME_COUNT
+        ) or 0
     )
 
     width = int(
-        cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0
+        cap.get(
+            cv2.CAP_PROP_FRAME_WIDTH
+        ) or 0
     )
 
     height = int(
-        cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
+        cap.get(
+            cv2.CAP_PROP_FRAME_HEIGHT
+        ) or 0
     )
 
     duration = (
         frames / fps
-        if fps
+        if fps > 0
         else 0
     )
 
@@ -313,9 +441,13 @@ def run_video_prediction(video_path):
         return_frame_scores=True
     )
 
-    fake_score = 0.0
     real_score = 0.0
+    fake_score = 0.0
     frame_scores = []
+
+    if isinstance(results, dict):
+
+        results = [results]
 
     for item in results:
 
@@ -324,119 +456,150 @@ def run_video_prediction(video_path):
 
         label = str(
             item.get("label", "")
-        ).lower()
+        ).strip().lower()
 
         score = float(
-            item.get("score", 0)
+            item.get("score", 0.0)
         )
 
-        if label == "fake":
-
-            fake_score = score
-
-        elif label == "real":
-
-            real_score = score
-
-        elif "frame_scores" in item:
-
-            frame_scores = item[
-                "frame_scores"
-            ]
-
-    if fake_score >= real_score:
-
-        verdict = "FALSE"
-        meaning = "DEEPFAKE"
-        confidence = fake_score
-
-    else:
-
-        verdict = "TRUE"
-        meaning = "REAL"
-        confidence = real_score
-
-    return {
-
-        "verdict": verdict,
-
-        "meaning": meaning,
-
-        "confidence": confidence,
-
-        "fake_score": fake_score,
-
-        "real_score": real_score,
-
-        "frame_scores": frame_scores
-
-    }
-
-
-# ============================================================
-# IMAGE PREDICTION
-# ============================================================
-
-def run_image_prediction(image):
-
-    detector = load_image_model()
-
-    results = detector(image)
-
-    fake_score = 0.0
-    real_score = 0.0
-
-    for item in results:
-
-        label = str(
-            item.get("label", "")
-        ).lower()
-
-        score = float(
-            item.get("score", 0)
-        )
-
-        if "fake" in label or "deepfake" in label:
-
-            fake_score = max(
-                fake_score,
-                score
-            )
-
-        elif "real" in label:
+        # Model labels
+        if label == "real":
 
             real_score = max(
                 real_score,
                 score
             )
 
-    if fake_score >= real_score:
+        elif label == "fake":
 
-        meaning = "DEEPFAKE"
-        verdict = "FALSE"
+            fake_score = max(
+                fake_score,
+                score
+            )
+
+        # Fallback label handling
+        elif label in ["label_0", "0"]:
+
+            real_score = max(
+                real_score,
+                score
+            )
+
+        elif label in ["label_1", "1"]:
+
+            fake_score = max(
+                fake_score,
+                score
+            )
+
+        # Frame-level evidence
+        if "frame_scores" in item:
+
+            frame_scores = item[
+                "frame_scores"
+            ]
+
+    if fake_score > real_score:
+
+        verdict = "DEEPFAKE"
         confidence = fake_score
 
     else:
 
-        meaning = "REAL"
-        verdict = "TRUE"
+        verdict = "REAL"
         confidence = real_score
 
     return {
 
         "verdict": verdict,
 
-        "meaning": meaning,
-
         "confidence": confidence,
+
+        "real_score": real_score,
 
         "fake_score": fake_score,
 
-        "real_score": real_score,
+        "frame_scores": frame_scores,
 
         "raw_results": results
 
     }
+
+
+# ============================================================
+# RESULT DISPLAY
+# ============================================================
+
+def display_result(
+    media_type,
+    prediction
+):
+
+    verdict = prediction["verdict"]
+
+    confidence = prediction["confidence"]
+
+    real_score = prediction["real_score"]
+
+    fake_score = prediction["fake_score"]
+
+    if verdict == "REAL":
+
+        result_class = "result-real"
+
+    else:
+
+        result_class = "result-fake"
+
+    st.markdown(
+        '<div class="section-title">'
+        'RESULT'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        f"""
+        <div class="result-card">
+
+        <div style="
+        color:#999;
+        font-size:14px;
+        letter-spacing:4px;
+        font-weight:700;
+        ">
+        DEEPTRACE {media_type.upper()} VERDICT
+        </div>
+
+        <div class="{result_class}">
+        {verdict}
+        </div>
+
+        <div class="confidence">
+        Model confidence:
+        {confidence * 100:.2f}%
+        </div>
+
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+
+        st.metric(
+            "REAL SCORE",
+            f"{real_score * 100:.2f}%"
+        )
+
+    with c2:
+
+        st.metric(
+            "DEEPFAKE SCORE",
+            f"{fake_score * 100:.2f}%"
+        )
 
 
 # ============================================================
@@ -573,11 +736,16 @@ if page == "HOME":
 
     st.write(
         """
-        The current prototype supports video analysis and
-        the Review 2 image-analysis module is being integrated.
-        The planned system will later include audio analysis,
-        transcription, lip-sync analysis, explainability,
-        multimodal evidence correlation and forensic reporting.
+        DEEPTRACE currently supports AI-based
+        deepfake analysis for images and videos.
+
+        The system compares REAL and DEEPFAKE probabilities
+        and presents a model-based forensic verdict.
+
+        Future modules will include audio analysis,
+        speech transcription, lip-sync analysis,
+        explainable AI, multimodal evidence correlation
+        and forensic report generation.
         """
     )
 
@@ -603,7 +771,7 @@ elif page == "IMAGE":
 
     st.write(
         "Upload an image to perform AI-based "
-        "deepfake image analysis."
+        "deepfake analysis."
     )
 
     uploaded_image = st.file_uploader(
@@ -646,9 +814,13 @@ elif page == "IMAGE":
                         )
                     )
 
-                image_hash = hashlib.sha256(
+                image_bytes = (
                     uploaded_image.getvalue()
-                ).hexdigest()
+                )
+
+                image_hash = sha256_bytes(
+                    image_bytes
+                )
 
                 st.session_state.image_analysis = {
 
@@ -656,9 +828,8 @@ elif page == "IMAGE":
                         uploaded_image.name,
 
                     "size_mb":
-                        len(
-                            uploaded_image.getvalue()
-                        ) / (1024 * 1024),
+                        len(image_bytes)
+                        / (1024 * 1024),
 
                     "hash":
                         image_hash,
@@ -672,69 +843,10 @@ elif page == "IMAGE":
                     "Image analysis completed."
                 )
 
-                st.markdown(
-                    '<div class="section-title">'
-                    'RESULT'
-                    '</div>',
-                    unsafe_allow_html=True
+                display_result(
+                    "IMAGE",
+                    prediction
                 )
-
-                meaning = prediction[
-                    "meaning"
-                ]
-
-                confidence = prediction[
-                    "confidence"
-                ]
-
-                result_class = (
-                    "result-real"
-                    if meaning == "REAL"
-                    else "result-fake"
-                )
-
-                st.markdown(
-                    f"""
-                    <div class="result-card">
-
-                    <div style="
-                    color:#999;
-                    font-size:14px;
-                    letter-spacing:4px;
-                    font-weight:700;
-                    ">
-                    DEEPTRACE IMAGE VERDICT
-                    </div>
-
-                    <div class="{result_class}">
-                    {meaning}
-                    </div>
-
-                    <div class="confidence">
-                    Model confidence:
-                    {confidence * 100:.2f}%
-                    </div>
-
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-                c1, c2 = st.columns(2)
-
-                with c1:
-
-                    st.metric(
-                        "REAL SCORE",
-                        f"{prediction['real_score'] * 100:.2f}%"
-                    )
-
-                with c2:
-
-                    st.metric(
-                        "FAKE SCORE",
-                        f"{prediction['fake_score'] * 100:.2f}%"
-                    )
 
                 st.markdown(
                     '<div class="section-title">'
@@ -744,22 +856,30 @@ elif page == "IMAGE":
                 )
 
                 st.write(
-                    f"**File:** {uploaded_image.name}"
+                    f"**File:** "
+                    f"{uploaded_image.name}"
                 )
 
                 st.write(
-                    f"**SHA-256:** `{image_hash}`"
+                    f"**SHA-256:** "
+                    f"`{image_hash}`"
                 )
 
                 st.write(
                     f"**Image size:** "
-                    f"{image.width} × {image.height}"
+                    f"{image.width} × "
+                    f"{image.height}"
+                )
+
+                st.write(
+                    f"**Model:** "
+                    f"`{MODEL_NAME}`"
                 )
 
                 st.warning(
-                    "This is a model-based prediction. "
-                    "It should not be treated as absolute proof "
-                    "of manipulation."
+                    "This is an AI model prediction. "
+                    "It should be interpreted together with "
+                    "other forensic evidence."
                 )
 
             except Exception as e:
@@ -783,6 +903,11 @@ elif page == "VIDEO":
         'VIDEO ANALYSIS'
         '</div>',
         unsafe_allow_html=True
+    )
+
+    st.write(
+        "Upload a short video to perform "
+        "AI-based deepfake analysis."
     )
 
     uploaded = st.file_uploader(
@@ -821,18 +946,21 @@ elif page == "VIDEO":
 
             try:
 
-                # OpenCV is imported only when
-                # the user actually analyzes a video.
-                info = get_video_info(
-                    str(video_path)
-                )
+                with st.spinner(
+                    "Reading video information..."
+                ):
+
+                    info = get_video_info(
+                        str(video_path)
+                    )
 
                 file_hash = sha256_file(
                     str(video_path)
                 )
 
                 with st.spinner(
-                    "DeepTrace is analyzing the video..."
+                    "DeepTrace is analyzing "
+                    "video frames..."
                 ):
 
                     prediction = (
@@ -865,45 +993,9 @@ elif page == "VIDEO":
                     "Video analysis completed."
                 )
 
-                meaning = prediction[
-                    "meaning"
-                ]
-
-                confidence = prediction[
-                    "confidence"
-                ]
-
-                result_class = (
-                    "result-real"
-                    if meaning == "REAL"
-                    else "result-fake"
-                )
-
-                st.markdown(
-                    f"""
-                    <div class="result-card">
-
-                    <div style="
-                    color:#999;
-                    font-size:14px;
-                    letter-spacing:4px;
-                    font-weight:700;
-                    ">
-                    DEEPTRACE VIDEO VERDICT
-                    </div>
-
-                    <div class="{result_class}">
-                    {meaning}
-                    </div>
-
-                    <div class="confidence">
-                    Model confidence:
-                    {confidence * 100:.2f}%
-                    </div>
-
-                    </div>
-                    """,
-                    unsafe_allow_html=True
+                display_result(
+                    "VIDEO",
+                    prediction
                 )
 
                 c1, c2, c3, c4 = st.columns(4)
@@ -945,11 +1037,13 @@ elif page == "VIDEO":
                 )
 
                 st.write(
-                    f"**File:** {uploaded.name}"
+                    f"**File:** "
+                    f"{uploaded.name}"
                 )
 
                 st.write(
-                    f"**SHA-256:** `{file_hash}`"
+                    f"**SHA-256:** "
+                    f"`{file_hash}`"
                 )
 
                 st.write(
@@ -958,14 +1052,47 @@ elif page == "VIDEO":
                 )
 
                 st.write(
-                    f"**Real score:** "
-                    f"{prediction['real_score'] * 100:.2f}%"
+                    f"**Model:** "
+                    f"`{MODEL_NAME}`"
                 )
 
                 st.write(
-                    f"**Deepfake score:** "
-                    f"{prediction['fake_score'] * 100:.2f}%"
+                    f"**Frames analyzed:** "
+                    f"20"
                 )
+
+                # ------------------------------------------------
+                # FRAME EVIDENCE
+                # ------------------------------------------------
+
+                frame_scores = prediction.get(
+                    "frame_scores",
+                    []
+                )
+
+                if frame_scores:
+
+                    st.markdown(
+                        '<div class="section-title">'
+                        'FRAME-LEVEL EVIDENCE'
+                        '</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    st.write(
+                        "Higher values indicate stronger "
+                        "deepfake evidence for the sampled frame."
+                    )
+
+                    try:
+
+                        st.line_chart(
+                            frame_scores
+                        )
+
+                    except Exception:
+
+                        pass
 
                 st.warning(
                     "The result is a model prediction. "
@@ -1034,12 +1161,22 @@ elif page == "RESULTS":
 
             st.write(
                 f"**Result:** "
-                f"{image_prediction['meaning']}"
+                f"{image_prediction['verdict']}"
             )
 
             st.write(
                 f"**Confidence:** "
                 f"{image_prediction['confidence'] * 100:.2f}%"
+            )
+
+            st.write(
+                f"**Real score:** "
+                f"{image_prediction['real_score'] * 100:.2f}%"
+            )
+
+            st.write(
+                f"**Deepfake score:** "
+                f"{image_prediction['fake_score'] * 100:.2f}%"
             )
 
         if has_video:
@@ -1063,12 +1200,22 @@ elif page == "RESULTS":
 
             st.write(
                 f"**Result:** "
-                f"{video_prediction['meaning']}"
+                f"{video_prediction['verdict']}"
             )
 
             st.write(
                 f"**Confidence:** "
                 f"{video_prediction['confidence'] * 100:.2f}%"
+            )
+
+            st.write(
+                f"**Real score:** "
+                f"{video_prediction['real_score'] * 100:.2f}%"
+            )
+
+            st.write(
+                f"**Deepfake score:** "
+                f"{video_prediction['fake_score'] * 100:.2f}%"
             )
 
         st.markdown(
@@ -1083,6 +1230,10 @@ elif page == "RESULTS":
             ✅ Image deepfake analysis
 
             ✅ Video deepfake analysis
+
+            ✅ Real vs Deepfake probability
+
+            ✅ Frame-level video evidence
 
             ⏳ Audio deepfake analysis
 

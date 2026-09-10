@@ -1,5 +1,5 @@
 import streamlit as st
-import cv2
+# OpenCV is loaded only when video analysis is needed
 import hashlib
 import tempfile
 from pathlib import Path
@@ -251,6 +251,9 @@ def sha256_file(path):
 # ============================================================
 
 def get_video_info(path):
+
+    # Load OpenCV only when video functionality is used
+    import cv2
 
     cap = cv2.VideoCapture(path)
 
@@ -816,15 +819,17 @@ elif page == "VIDEO":
                 uploaded.getbuffer()
             )
 
-            info = get_video_info(
-                str(video_path)
-            )
-
-            file_hash = sha256_file(
-                str(video_path)
-            )
-
             try:
+
+                # OpenCV is imported only when
+                # the user actually analyzes a video.
+                info = get_video_info(
+                    str(video_path)
+                )
+
+                file_hash = sha256_file(
+                    str(video_path)
+                )
 
                 with st.spinner(
                     "DeepTrace is analyzing the video..."

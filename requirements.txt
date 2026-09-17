@@ -1,8 +1,5 @@
 streamlit
 torch
-transformers
+torchvision
 Pillow
-deepguard
-albumentations
-tqdm
 opencv-python-headless

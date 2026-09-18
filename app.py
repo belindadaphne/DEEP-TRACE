@@ -47,7 +47,6 @@ header {
     padding-bottom: 4rem;
 }
 
-/* Hide Streamlit menu */
 #MainMenu {
     visibility: hidden;
 }
@@ -56,7 +55,6 @@ footer {
     visibility: hidden;
 }
 
-/* Brand */
 .brand {
     font-size: 42px;
     font-weight: 800;
@@ -75,7 +73,6 @@ footer {
     margin-top: -8px;
 }
 
-/* Navigation badge */
 .nav-badge {
     display: inline-block;
     background: #E50914;
@@ -87,7 +84,6 @@ footer {
     letter-spacing: 1px;
 }
 
-/* Hero */
 .hero {
     padding: 55px 0 35px 0;
 }
@@ -110,7 +106,6 @@ footer {
     line-height: 1.7;
 }
 
-/* Cards */
 .card {
     background: rgba(25,25,25,0.92);
     border: 1px solid #292929;
@@ -129,7 +124,6 @@ footer {
     color: #a8a8a8;
 }
 
-/* Result */
 .result-real {
     background: linear-gradient(135deg, #071f12, #0b2e1a);
     border: 1px solid #1d9b59;
@@ -156,7 +150,6 @@ footer {
     margin-top: 5px;
 }
 
-/* Metrics */
 .metric-box {
     background: #181818;
     border: 1px solid #2d2d2d;
@@ -176,7 +169,6 @@ footer {
     margin-top: 5px;
 }
 
-/* Upload area */
 [data-testid="stFileUploader"] {
     background: #151515;
     border: 1px dashed #555;
@@ -184,7 +176,6 @@ footer {
     padding: 12px;
 }
 
-/* Buttons */
 .stButton > button {
     background: #E50914;
     color: white;
@@ -199,7 +190,6 @@ footer {
     color: white;
 }
 
-/* Radio */
 .stRadio label {
     color: white !important;
 }
@@ -253,26 +243,42 @@ st.divider()
 
 MODEL_PATH = "deeptrace_model_scripted.pt"
 
+
 @st.cache_resource
 def load_model():
+
     if not os.path.exists(MODEL_PATH):
         return None
 
     try:
-        model = torch.jit.load(MODEL_PATH, map_location="cpu")
+        model = torch.jit.load(
+            MODEL_PATH,
+            map_location="cpu"
+        )
+
         model.eval()
+
         return model
+
     except Exception as e:
+
         st.error("Model loading failed.")
         st.code(str(e))
+
         return None
 
 
 model = load_model()
 
+
 if model is not None:
-    st.success("DEEP-TRACE trained model loaded successfully.")
+
+    st.success(
+        "DEEP-TRACE trained model loaded successfully."
+    )
+
 else:
+
     st.error(
         "Trained model not found. Make sure "
         "deeptrace_model_scripted.pt is in the same folder as app.py."
@@ -285,43 +291,79 @@ else:
 
 def predict_image(image):
 
-    # Model preprocessing
     image = image.convert("RGB")
+
     image = image.resize((224, 224))
 
-    img = np.array(image).astype(np.float32) / 255.0
+    img = np.array(image).astype(
+        np.float32
+    ) / 255.0
 
-    # Normalize approximately as standard ImageNet
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
+    # ImageNet normalization
+    mean = np.array(
+        [0.485, 0.456, 0.406]
+    )
+
+    std = np.array(
+        [0.229, 0.224, 0.225]
+    )
 
     img = (img - mean) / std
 
-    tensor = torch.tensor(img).permute(2, 0, 1).unsqueeze(0).float()
+    tensor = torch.tensor(
+        img
+    ).permute(
+        2, 0, 1
+    ).unsqueeze(
+        0
+    ).float()
 
     with torch.no_grad():
+
         output = model(tensor)
 
-    # Handle different model output formats
-    if isinstance(output, (tuple, list)):
+    if isinstance(
+        output,
+        (tuple, list)
+    ):
+
         output = output[0]
 
-    # Convert to probabilities
-    probabilities = torch.softmax(output, dim=1)[0]
+    probabilities = torch.softmax(
+        output,
+        dim=1
+    )[0]
 
-    # Your training output showed:
-    # CLASS ORDER = ['fake', 'real']
-    fake_probability = float(probabilities[0])
-    real_probability = float(probabilities[1])
+    # Training class order:
+    # 0 = fake
+    # 1 = real
+
+    fake_probability = float(
+        probabilities[0]
+    )
+
+    real_probability = float(
+        probabilities[1]
+    )
 
     if fake_probability > real_probability:
+
         verdict = "FAKE"
+
         confidence = fake_probability
+
     else:
+
         verdict = "REAL"
+
         confidence = real_probability
 
-    return verdict, confidence, fake_probability, real_probability
+    return (
+        verdict,
+        confidence,
+        fake_probability,
+        real_probability
+    )
 
 
 # ============================================================
@@ -355,12 +397,19 @@ if input_type == "Image":
 
     uploaded_file = st.file_uploader(
         "Choose an image",
-        type=["jpg", "jpeg", "png", "webp"]
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+            "webp"
+        ]
     )
 
     if uploaded_file is not None:
 
-        image = Image.open(uploaded_file).convert("RGB")
+        image = Image.open(
+            uploaded_file
+        ).convert("RGB")
 
         st.image(
             image,
@@ -370,79 +419,128 @@ if input_type == "Image":
 
         if model is not None:
 
-            with st.spinner("DEEP-TRACE is analyzing the image..."):
+            with st.spinner(
+                "DEEP-TRACE is analyzing the image..."
+            ):
 
                 try:
-                    verdict, confidence, fake_prob, real_prob = predict_image(image)
+
+                    (
+                        verdict,
+                        confidence,
+                        fake_prob,
+                        real_prob
+                    ) = predict_image(image)
+
 
                     if verdict == "FAKE":
 
-                        st.markdown(f"""
-                        <div class="result-fake">
-                            <div class="result-title">⚠️ FAKE</div>
-                            <div class="result-subtitle">
-                                DEEP-TRACE detected characteristics
-                                associated with manipulated media.
+                        st.markdown(
+                            f"""
+                            <div class="result-fake">
+                                <div class="result-title">
+                                    ⚠️ FAKE
+                                </div>
+
+                                <div class="result-subtitle">
+                                    DEEP-TRACE detected characteristics
+                                    associated with manipulated media.
+                                </div>
                             </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            """,
+                            unsafe_allow_html=True
+                        )
 
                     else:
 
-                        st.markdown(f"""
-                        <div class="result-real">
-                            <div class="result-title">✓ REAL</div>
-                            <div class="result-subtitle">
-                                DEEP-TRACE classified this media as
-                                likely authentic.
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        st.markdown(
+                            f"""
+                            <div class="result-real">
+                                <div class="result-title">
+                                    ✓ REAL
+                                </div>
 
-                    st.markdown("### Analysis")
+                                <div class="result-subtitle">
+                                    DEEP-TRACE classified this media as
+                                    likely authentic.
+                                </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+
+
+                    st.markdown(
+                        "### Analysis"
+                    )
+
 
                     c1, c2, c3 = st.columns(3)
 
+
                     with c1:
-                        st.markdown(f"""
-                        <div class="metric-box">
-                            <div class="metric-value">
-                                {confidence * 100:.1f}%
+
+                        st.markdown(
+                            f"""
+                            <div class="metric-box">
+                                <div class="metric-value">
+                                    {confidence * 100:.1f}%
+                                </div>
+
+                                <div class="metric-label">
+                                    CONFIDENCE
+                                </div>
                             </div>
-                            <div class="metric-label">
-                                CONFIDENCE
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            """,
+                            unsafe_allow_html=True
+                        )
+
 
                     with c2:
-                        st.markdown(f"""
-                        <div class="metric-box">
-                            <div class="metric-value">
-                                {real_prob * 100:.1f}%
+
+                        st.markdown(
+                            f"""
+                            <div class="metric-box">
+                                <div class="metric-value">
+                                    {real_prob * 100:.1f}%
+                                </div>
+
+                                <div class="metric-label">
+                                    REAL SCORE
+                                </div>
                             </div>
-                            <div class="metric-label">
-                                REAL SCORE
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            """,
+                            unsafe_allow_html=True
+                        )
+
 
                     with c3:
-                        st.markdown(f"""
-                        <div class="metric-box">
-                            <div class="metric-value">
-                                {fake_prob * 100:.1f}%
+
+                        st.markdown(
+                            f"""
+                            <div class="metric-box">
+                                <div class="metric-value">
+                                    {fake_prob * 100:.1f}%
+                                </div>
+
+                                <div class="metric-label">
+                                    FAKE SCORE
+                                </div>
                             </div>
-                            <div class="metric-label">
-                                FAKE SCORE
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            """,
+                            unsafe_allow_html=True
+                        )
+
 
                 except Exception as e:
 
-                    st.error("Prediction error.")
-                    st.code(str(e))
+                    st.error(
+                        "Prediction error."
+                    )
+
+                    st.code(
+                        str(e)
+                    )
 
 
 # ============================================================
@@ -458,12 +556,21 @@ else:
 
     uploaded_video = st.file_uploader(
         "Choose a video",
-        type=["mp4", "mov", "avi", "mkv"]
+        type=[
+            "mp4",
+            "mov",
+            "avi",
+            "mkv"
+        ]
     )
+
 
     if uploaded_video is not None:
 
-        st.video(uploaded_video)
+        st.video(
+            uploaded_video
+        )
+
 
         if model is not None:
 
@@ -472,65 +579,134 @@ else:
                 "and combines their predictions."
             )
 
-            if st.button("🔍 ANALYZE VIDEO"):
+
+            if st.button(
+                "🔍 ANALYZE VIDEO"
+            ):
+
+                video_path = None
 
                 try:
 
+                    # ------------------------------------------------
                     # Save uploaded video temporarily
+                    # ------------------------------------------------
+
                     suffix = os.path.splitext(
                         uploaded_video.name
                     )[1]
+
 
                     with tempfile.NamedTemporaryFile(
                         delete=False,
                         suffix=suffix
                     ) as temp:
 
-                        temp.write(uploaded_video.read())
+                        temp.write(
+                            uploaded_video.read()
+                        )
+
                         video_path = temp.name
 
-                    # Use imageio for video reading
-                    import imageio.v3 as iio
+
+                    # ------------------------------------------------
+                    # ImageIO video reader
+                    # IMPORTANT:
+                    # Do NOT use plugin="ffmpeg"
+                    # ------------------------------------------------
+
+                    import imageio
+
 
                     fake_scores = []
+
                     real_scores = []
 
                     frame_count = 0
+
 
                     with st.spinner(
                         "DEEP-TRACE is analyzing video frames..."
                     ):
 
-                        for frame in iio.imiter(
-                            video_path,
-                            plugin="ffmpeg"
-                        ):
+                        reader = imageio.get_reader(
+                            video_path
+                        )
 
-                            # Analyze every ~15th frame
-                            if frame_count % 15 == 0:
 
-                                frame_image = Image.fromarray(
-                                    frame
-                                ).convert("RGB")
+                        try:
 
-                                try:
+                            for frame in reader:
 
-                                    verdict, confidence, fake_p, real_p = \
-                                        predict_image(frame_image)
+                                # Analyze every 15th frame
 
-                                    fake_scores.append(fake_p)
-                                    real_scores.append(real_p)
+                                if frame_count % 15 == 0:
 
-                                except Exception:
-                                    pass
+                                    frame_image = Image.fromarray(
+                                        frame
+                                    ).convert(
+                                        "RGB"
+                                    )
 
-                            frame_count += 1
 
-                            # Prevent extremely long processing
-                            if frame_count >= 300:
-                                break
+                                    try:
 
-                    os.remove(video_path)
+                                        (
+                                            verdict,
+                                            confidence,
+                                            fake_p,
+                                            real_p
+                                        ) = predict_image(
+                                            frame_image
+                                        )
+
+
+                                        fake_scores.append(
+                                            fake_p
+                                        )
+
+                                        real_scores.append(
+                                            real_p
+                                        )
+
+
+                                    except Exception:
+
+                                        pass
+
+
+                                frame_count += 1
+
+
+                                # Maximum 300 frames
+                                if frame_count >= 300:
+
+                                    break
+
+
+                        finally:
+
+                            reader.close()
+
+
+                    # ------------------------------------------------
+                    # Remove temporary video
+                    # ------------------------------------------------
+
+                    if video_path is not None and os.path.exists(
+                        video_path
+                    ):
+
+                        os.remove(
+                            video_path
+                        )
+
+                        video_path = None
+
+
+                    # ------------------------------------------------
+                    # Check extracted frames
+                    # ------------------------------------------------
 
                     if len(fake_scores) == 0:
 
@@ -538,99 +714,176 @@ else:
                             "Could not extract frames from this video."
                         )
 
+
                     else:
 
+                        # Average frame predictions
+
                         avg_fake = float(
-                            np.mean(fake_scores)
+                            np.mean(
+                                fake_scores
+                            )
                         )
 
                         avg_real = float(
-                            np.mean(real_scores)
+                            np.mean(
+                                real_scores
+                            )
                         )
 
+
                         if avg_fake > avg_real:
+
                             final_verdict = "FAKE"
+
                             final_confidence = avg_fake
+
                         else:
+
                             final_verdict = "REAL"
+
                             final_confidence = avg_real
+
+
+                        # ------------------------------------------------
+                        # Result
+                        # ------------------------------------------------
 
                         if final_verdict == "FAKE":
 
-                            st.markdown(f"""
-                            <div class="result-fake">
-                                <div class="result-title">
-                                    ⚠️ FAKE
+                            st.markdown(
+                                f"""
+                                <div class="result-fake">
+                                    <div class="result-title">
+                                        ⚠️ FAKE
+                                    </div>
+
+                                    <div class="result-subtitle">
+                                        Video analysis indicates possible
+                                        manipulated content.
+                                    </div>
                                 </div>
-                                <div class="result-subtitle">
-                                    Video analysis indicates possible
-                                    manipulated content.
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                                """,
+                                unsafe_allow_html=True
+                            )
 
                         else:
 
-                            st.markdown(f"""
-                            <div class="result-real">
-                                <div class="result-title">
-                                    ✓ REAL
-                                </div>
-                                <div class="result-subtitle">
-                                    Video analysis indicates likely
-                                    authentic content.
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            st.markdown(
+                                f"""
+                                <div class="result-real">
+                                    <div class="result-title">
+                                        ✓ REAL
+                                    </div>
 
-                        st.markdown("### Video Analysis")
+                                    <div class="result-subtitle">
+                                        Video analysis indicates likely
+                                        authentic content.
+                                    </div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True
+                            )
+
+
+                        # ------------------------------------------------
+                        # Video Analysis
+                        # ------------------------------------------------
+
+                        st.markdown(
+                            "### Video Analysis"
+                        )
+
 
                         c1, c2, c3 = st.columns(3)
 
+
                         with c1:
-                            st.markdown(f"""
-                            <div class="metric-box">
-                                <div class="metric-value">
-                                    {final_confidence * 100:.1f}%
+
+                            st.markdown(
+                                f"""
+                                <div class="metric-box">
+                                    <div class="metric-value">
+                                        {final_confidence * 100:.1f}%
+                                    </div>
+
+                                    <div class="metric-label">
+                                        CONFIDENCE
+                                    </div>
                                 </div>
-                                <div class="metric-label">
-                                    CONFIDENCE
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                                """,
+                                unsafe_allow_html=True
+                            )
+
 
                         with c2:
-                            st.markdown(f"""
-                            <div class="metric-box">
-                                <div class="metric-value">
-                                    {avg_real * 100:.1f}%
+
+                            st.markdown(
+                                f"""
+                                <div class="metric-box">
+                                    <div class="metric-value">
+                                        {avg_real * 100:.1f}%
+                                    </div>
+
+                                    <div class="metric-label">
+                                        REAL SCORE
+                                    </div>
                                 </div>
-                                <div class="metric-label">
-                                    REAL SCORE
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                                """,
+                                unsafe_allow_html=True
+                            )
+
 
                         with c3:
-                            st.markdown(f"""
-                            <div class="metric-box">
-                                <div class="metric-value">
-                                    {avg_fake * 100:.1f}%
+
+                            st.markdown(
+                                f"""
+                                <div class="metric-box">
+                                    <div class="metric-value">
+                                        {avg_fake * 100:.1f}%
+                                    </div>
+
+                                    <div class="metric-label">
+                                        FAKE SCORE
+                                    </div>
                                 </div>
-                                <div class="metric-label">
-                                    FAKE SCORE
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                                """,
+                                unsafe_allow_html=True
+                            )
+
 
                         st.caption(
                             f"Analyzed {len(fake_scores)} video frames."
                         )
 
+
                 except Exception as e:
 
-                    st.error("Video analysis failed.")
-                    st.code(str(e))
+                    # Remove temporary file if something fails
+
+                    if (
+                        video_path is not None
+                        and os.path.exists(video_path)
+                    ):
+
+                        try:
+
+                            os.remove(
+                                video_path
+                            )
+
+                        except Exception:
+
+                            pass
+
+
+                    st.error(
+                        "Video analysis failed."
+                    )
+
+                    st.code(
+                        str(e)
+                    )
 
 
 # ============================================================
@@ -639,10 +892,13 @@ else:
 
 st.divider()
 
-st.markdown("""
-<div style="text-align:center;color:#666;padding:20px;">
-    <b style="color:#aaa;">DEEP-TRACE</b><br>
-    AI-Powered Deepfake Detection System<br>
-    <small>For research and educational purposes.</small>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    """
+    <div style="text-align:center;color:#666;padding:20px;">
+        <b style="color:#aaa;">DEEP-TRACE</b><br>
+        AI-Powered Deepfake Detection System<br>
+        <small>For research and educational purposes.</small>
+    </div>
+    """,
+    unsafe_allow_html=True
+)

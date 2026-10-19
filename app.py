@@ -7,13 +7,12 @@ import tempfile
 import os
 import hashlib
 import io
-import csv
 from datetime import datetime
 import imageio.v2 as imageio
 import pandas as pd
 
 # ==========================================
-# DEEP-TRACE: Deepfake Detection System
+# DEEP-TRACE CONFIGURATION
 # ==========================================
 
 st.set_page_config(
@@ -25,6 +24,7 @@ st.set_page_config(
 MODEL_PATH = "deeptrace_model_scripted.pt"
 FRAME_SAMPLE_INTERVAL = 15
 MAX_VIDEO_FRAMES = 300
+UNCERTAIN_THRESHOLD = 0.20
 
 st.markdown("""
 <style>
@@ -85,7 +85,7 @@ AI-POWERED MEDIA AUTHENTICITY ANALYSIS
     </div>
     <div class="hero-text">
         Analyze images and videos using deep learning.
-        Review frame-level predictions and download forensic reports.
+        Review sampled frame predictions and download forensic reports.
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -105,7 +105,7 @@ def load_model():
     try:
         loaded_model = torch.jit.load(
             MODEL_PATH,
-            map_location="cpu"
+            map_location="cpu",
         )
         loaded_model.eval()
         return loaded_model, None
@@ -171,7 +171,13 @@ def predict_image(image):
     fake_score = float(probabilities[0])
     real_score = float(probabilities[1])
 
-    verdict = "FAKE" if fake_score > real_score else "REAL"
+    difference = abs(fake_score - real_score)
+
+    if difference < UNCERTAIN_THRESHOLD:
+        verdict = "UNCERTAIN"
+    else:
+        verdict = "FAKE" if fake_score > real_score else "REAL"
+
     confidence = max(fake_score, real_score)
 
     return verdict, confidence, fake_score, real_score
@@ -187,37 +193,43 @@ def display_result(verdict, confidence, fake_score, real_score):
             f"⚠️ CLASSIFIED AS FAKE — "
             f"{confidence * 100:.2f}% top-class score"
         )
-    else:
+    elif verdict == "REAL":
         st.success(
             f"✓ CLASSIFIED AS REAL — "
             f"{confidence * 100:.2f}% top-class score"
+        )
+    else:
+        st.warning(
+            f"⚠️ UNCERTAIN — FAKE: {fake_score * 100:.2f}% | "
+            f"REAL: {real_score * 100:.2f}%. "
+            "The scores are too close for a confident verdict."
         )
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
         st.markdown(
-            f'<div class="metric"><h2>{confidence*100:.1f}%</h2>'
+            f'<div class="metric"><h2>{confidence * 100:.1f}%</h2>'
             '<p>TOP CLASS SCORE</p></div>',
             unsafe_allow_html=True,
         )
 
     with col2:
         st.markdown(
-            f'<div class="metric"><h2>{real_score*100:.1f}%</h2>'
+            f'<div class="metric"><h2>{real_score * 100:.1f}%</h2>'
             '<p>REAL SCORE</p></div>',
             unsafe_allow_html=True,
         )
 
     with col3:
         st.markdown(
-            f'<div class="metric"><h2>{fake_score*100:.1f}%</h2>'
+            f'<div class="metric"><h2>{fake_score * 100:.1f}%</h2>'
             '<p>FAKE SCORE</p></div>',
             unsafe_allow_html=True,
         )
 
-    st.progress(fake_score, text=f"FAKE score: {fake_score*100:.1f}%")
-    st.progress(real_score, text=f"REAL score: {real_score*100:.1f}%")
+    st.progress(fake_score, text=f"FAKE score: {fake_score * 100:.1f}%")
+    st.progress(real_score, text=f"REAL score: {real_score * 100:.1f}%")
 
 
 # ==========================================
@@ -248,18 +260,21 @@ Media type: {media_type}
 SHA-256: {file_hash}
 
 Classification: {verdict}
-Top-class score: {confidence*100:.2f}%
-REAL score: {real_score*100:.2f}%
-FAKE score: {fake_score*100:.2f}%
+Top-class score: {confidence * 100:.2f}%
+REAL score: {real_score * 100:.2f}%
+FAKE score: {fake_score * 100:.2f}%
 
 Analysis details:
 {details}
 
 LIMITATIONS
 -----------
-This is an AI model prediction, not proof of authenticity or manipulation.
-Scores may not be calibrated probabilities. Independent verification
-is recommended before drawing conclusions.
+UNCERTAIN is used when the REAL and FAKE scores differ by less than
+{UNCERTAIN_THRESHOLD * 100:.0f} percentage points.
+
+Model scores are not necessarily calibrated probabilities. A score is
+not the same as verified accuracy. This AI prediction is not proof of
+authenticity or manipulation. Independent verification is recommended.
 """
 
 
@@ -285,6 +300,7 @@ if media_type == "Image":
     uploaded = st.file_uploader(
         "Upload an image",
         type=["jpg", "jpeg", "png", "webp"],
+        key="image_upload",
     )
 
     if uploaded is not None:
@@ -302,7 +318,7 @@ if media_type == "Image":
 
             st.caption(
                 f"File: {uploaded.name} | "
-                f"Size: {len(raw_data)/1024:.1f} KB"
+                f"Size: {len(raw_data) / 1024:.1f} KB"
             )
 
             if st.button("🔍 ANALYZE IMAGE", disabled=model is None):
@@ -351,6 +367,7 @@ else:
     uploaded = st.file_uploader(
         "Upload a video",
         type=["mp4", "mov", "avi", "mkv"],
+        key="video_upload",
     )
 
     if uploaded is not None:
@@ -361,7 +378,7 @@ else:
 
         st.caption(
             f"File: {uploaded.name} | "
-            f"Size: {len(raw_data)/(1024*1024):.2f} MB"
+            f"Size: {len(raw_data) / (1024 * 1024):.2f} MB"
         )
 
         st.info(
@@ -387,7 +404,7 @@ else:
 
                 reader = imageio.get_reader(video_path)
 
-                # Read video FPS for timestamp calculation.
+                # Read FPS to calculate timestamps.
                 metadata = reader.get_meta_data()
                 fps_value = metadata.get("fps", 0)
 
@@ -398,12 +415,12 @@ else:
                 except (TypeError, ValueError):
                     fps = None
 
-                if fps:
+                if fps is not None:
                     st.caption(f"Video frame rate: {fps:.2f} FPS")
                 else:
                     st.warning(
-                        "FPS metadata is unavailable. "
-                        "Frame timestamps will show as unavailable."
+                        "Video FPS metadata is unavailable. "
+                        "Timestamps cannot be calculated reliably."
                     )
 
                 progress = st.progress(0)
@@ -465,7 +482,13 @@ else:
                         row["REAL score (%)"] for row in frame_results
                     ])) / 100.0
 
-                    verdict = "FAKE" if fake_score > real_score else "REAL"
+                    difference = abs(fake_score - real_score)
+
+                    if difference < UNCERTAIN_THRESHOLD:
+                        verdict = "UNCERTAIN"
+                    else:
+                        verdict = "FAKE" if fake_score > real_score else "REAL"
+
                     confidence = max(fake_score, real_score)
 
                     display_result(
@@ -483,7 +506,7 @@ else:
                         hide_index=True,
                     )
 
-                    # CSV download
+                    # CSV export
                     csv_data = pd.DataFrame(frame_results).to_csv(index=False)
 
                     st.download_button(
@@ -493,7 +516,6 @@ else:
                         mime="text/csv",
                     )
 
-                    # Include frame details in the forensic report.
                     frame_summary = "\n".join(
                         f"Frame {row['Frame']} | "
                         f"Timestamp: {row['Timestamp (seconds)']} | "

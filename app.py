@@ -1,17 +1,22 @@
 
-import streamlit as st
-import torch
+import os
+import io
+import json
+import hashlib
+import tempfile
+from datetime import datetime
+
+import imageio.v2 as imageio
 import numpy as np
 import pandas as pd
-import imageio.v2 as imageio
-import hashlib
-import json
-import io
-from datetime import datetime
+import streamlit as st
+import torch
 from PIL import Image
 from torchvision import transforms
 
-# ---------------- CONFIGURATION ----------------
+
+# ================= CONFIGURATION =================
+
 st.set_page_config(
     page_title="DEEP-TRACE",
     page_icon="🔎",
@@ -20,13 +25,16 @@ st.set_page_config(
 
 MODEL_PATH = "deeptrace_model_scripted.pt"
 
-# Lower threshold: fewer UNCERTAIN verdicts
+# Lower threshold means fewer UNCERTAIN verdicts.
+# This does not improve the model's underlying accuracy.
 UNCERTAIN_THRESHOLD = 0.10
 
-MAX_VIDEO_FRAMES = 300
 FRAME_INTERVAL = 15
+MAX_VIDEO_FRAMES = 300
 
-# ---------------- STYLING ----------------
+
+# ================= STYLING =================
+
 st.markdown("""
 <style>
 .stApp {
@@ -36,35 +44,39 @@ st.markdown("""
 h1, h2, h3 {
     color: white;
 }
-.result-box {
-    padding: 20px;
-    border-radius: 12px;
-    margin: 12px 0;
-    background: #171717;
-    border: 1px solid #444;
-}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- HEADER ----------------
+
+# ================= HEADER =================
+
 st.markdown(
     "<h1>DEEP<span style='color:#ef1725'>-</span>TRACE</h1>",
     unsafe_allow_html=True
 )
+
 st.markdown("### AI-POWERED MEDIA AUTHENTICITY ANALYSIS")
 st.markdown("## Is it REAL or FAKE?")
+
 st.write(
     "Analyze images and videos using deep learning. "
     "Review sampled frame predictions and download forensic reports."
 )
+
 st.divider()
 
-# ---------------- MODEL LOADING ----------------
+
+# ================= MODEL LOADING =================
+
 @st.cache_resource
 def load_model():
-    model = torch.jit.load(MODEL_PATH, map_location="cpu")
+    model = torch.jit.load(
+        MODEL_PATH,
+        map_location="cpu"
+    )
     model.eval()
     return model
+
 
 try:
     model = load_model()
@@ -73,7 +85,9 @@ except Exception as e:
     st.error(f"Could not load the detection model: {e}")
     st.stop()
 
-# ---------------- IMAGE TRANSFORM ----------------
+
+# ================= IMAGE TRANSFORMATION =================
+
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -83,13 +97,16 @@ transform = transforms.Compose([
     )
 ])
 
-# ---------------- UTILITIES ----------------
+
+# ================= HELPER FUNCTIONS =================
+
 def sha256_hash(data):
     return hashlib.sha256(data).hexdigest()
 
 
 def predict_image(image):
-    """Return verdict and model scores for one image."""
+    """Predict REAL, FAKE, or UNCERTAIN for an image."""
+
     image = image.convert("RGB")
     tensor = transform(image).unsqueeze(0)
 
@@ -101,9 +118,14 @@ def predict_image(image):
 
         output = output.reshape(-1)
 
-        # Convert model output to scores.
+        if output.numel() != 2:
+            raise ValueError(
+                f"Expected 2 model outputs, got {output.numel()}."
+            )
+
         scores = torch.softmax(output, dim=0).cpu().numpy()
 
+    # Assumes model output order is [fake, real].
     fake_score = float(scores[0])
     real_score = float(scores[1])
 
@@ -125,6 +147,8 @@ def predict_image(image):
 
 
 def display_result(result):
+    """Display a verdict and its model scores."""
+
     verdict = result["verdict"]
 
     if verdict == "REAL":
@@ -132,49 +156,69 @@ def display_result(result):
     elif verdict == "FAKE":
         st.error("Verdict: FAKE")
     else:
-        st.warning("Verdict: UNCERTAIN — the scores are close.")
+        st.warning(
+            "Verdict: UNCERTAIN — the REAL and FAKE scores are close."
+        )
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.metric("REAL score", f"{result['real_score'] * 100:.2f}%")
+        st.metric(
+            "REAL score",
+            f"{result['real_score'] * 100:.2f}%"
+        )
 
     with col2:
-        st.metric("FAKE score", f"{result['fake_score'] * 100:.2f}%")
+        st.metric(
+            "FAKE score",
+            f"{result['fake_score'] * 100:.2f}%"
+        )
 
     st.caption(
-        "Scores are model outputs converted to relative scores; "
-        "they are not guaranteed to be calibrated probabilities or accuracy."
+        "These are relative model scores, not guaranteed calibrated "
+        "probabilities or measures of detection accuracy."
     )
 
 
-def create_report(report_data):
-    return json.dumps(report_data, indent=2, ensure_ascii=False)
+def report_json(data):
+    return json.dumps(data, indent=2, ensure_ascii=False)
 
 
-# ---------------- MEDIA TYPE ----------------
+# ================= MEDIA TYPE =================
+
 media_type = st.radio(
     "Choose media type",
     ["Image", "Video"],
     horizontal=True
 )
 
-# ---------------- IMAGE DETECTION ----------------
+
+# ================= IMAGE DETECTION =================
+
 if media_type == "Image":
+
     uploaded_file = st.file_uploader(
         "Upload an image",
-        type=["jpg", "jpeg", "png", "webp"],
-        help="Upload a JPG, JPEG, PNG, or WEBP image."
+        type=["jpg", "jpeg", "png", "webp"]
     )
 
     if uploaded_file is not None:
+
         try:
             file_bytes = uploaded_file.getvalue()
-            image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
 
-            st.image(image, caption="Uploaded image", use_container_width=True)
+            image = Image.open(
+                io.BytesIO(file_bytes)
+            ).convert("RGB")
+
+            st.image(
+                image,
+                caption="Uploaded image",
+                use_container_width=True
+            )
 
             if st.button("Analyze image", type="primary"):
+
                 with st.spinner("Analyzing image..."):
                     result = predict_image(image)
 
@@ -192,17 +236,17 @@ if media_type == "Image":
                     "fake_score": result["fake_score"],
                     "uncertain_threshold": UNCERTAIN_THRESHOLD,
                     "disclaimer": (
-                        "AI prediction only. Results are not conclusive proof "
-                        "of authenticity or manipulation."
+                        "AI prediction only; this is not conclusive "
+                        "proof of authenticity or manipulation."
                     )
                 }
 
-                st.markdown("### File integrity")
+                st.subheader("File integrity")
                 st.code(report["sha256"])
 
                 st.download_button(
                     "Download forensic report (JSON)",
-                    data=create_report(report),
+                    data=report_json(report),
                     file_name="deep_trace_image_report.json",
                     mime="application/json"
                 )
@@ -211,50 +255,80 @@ if media_type == "Image":
             st.error(f"Could not analyze this image: {e}")
 
 
-# ---------------- VIDEO DETECTION ----------------
+# ================= VIDEO DETECTION =================
+
 else:
+
     uploaded_video = st.file_uploader(
         "Upload a video",
-        type=["mp4", "mov", "avi", "mkv", "webm"],
-        help="Upload a supported video file."
+        type=["mp4", "mov", "avi", "mkv", "webm"]
     )
 
     if uploaded_video is not None:
+
         video_bytes = uploaded_video.getvalue()
 
         st.video(video_bytes)
 
         if st.button("Analyze video", type="primary"):
-            temp_video = io.BytesIO(video_bytes)
-            frame_results = []
-            fps = None
-            frame_count = 0
-            sampled_count = 0
+
+            temp_video_path = None
+            reader = None
 
             try:
-                reader = imageio.get_reader(temp_video, format="ffmpeg")
-                metadata = reader.get_meta_data()
+                # Save the uploaded video to a real temporary file.
+                # FFmpeg can read this path more reliably than BytesIO.
+                suffix = (
+                    os.path.splitext(uploaded_video.name)[1]
+                    or ".mp4"
+                )
 
-                raw_fps = metadata.get("fps")
-                if raw_fps is not None:
+                with tempfile.NamedTemporaryFile(
+                    suffix=suffix,
+                    delete=False
+                ) as temp_file:
+                    temp_file.write(video_bytes)
+                    temp_video_path = temp_file.name
+
+                frame_results = []
+                fps = None
+                frames_decoded = 0
+
+                with st.spinner("Analyzing sampled video frames..."):
+
+                    reader = imageio.get_reader(
+                        temp_video_path,
+                        format="ffmpeg"
+                    )
+
+                    metadata = reader.get_meta_data()
+
                     try:
-                        raw_fps = float(raw_fps)
-                        if np.isfinite(raw_fps) and raw_fps > 0:
-                            fps = raw_fps
+                        possible_fps = float(metadata.get("fps"))
+
+                        if (
+                            np.isfinite(possible_fps)
+                            and possible_fps > 0
+                        ):
+                            fps = possible_fps
+
                     except (TypeError, ValueError):
                         fps = None
 
-                with st.spinner("Analyzing sampled video frames..."):
                     for index, frame in enumerate(reader):
-                        frame_count += 1
+
+                        frames_decoded += 1
 
                         if index % FRAME_INTERVAL != 0:
                             continue
 
-                        if sampled_count >= MAX_VIDEO_FRAMES:
+                        if len(frame_results) >= MAX_VIDEO_FRAMES:
                             break
 
-                        pil_frame = Image.fromarray(frame).convert("RGB")
+                        pil_frame = Image.fromarray(
+                            frame
+                        ).convert("RGB")
+
                         result = predict_image(pil_frame)
 
                         timestamp = (
@@ -267,121 +341,154 @@ else:
                             "frame": index,
                             "timestamp_seconds": timestamp,
                             "prediction": result["verdict"],
-                            "real_score": round(result["real_score"], 6),
-                            "fake_score": round(result["fake_score"], 6),
+                            "real_score": round(
+                                result["real_score"], 6
+                            ),
+                            "fake_score": round(
+                                result["fake_score"], 6
+                            ),
                             "score_difference": round(
                                 result["difference"], 6
                             )
                         })
 
-                        sampled_count += 1
-
-                reader.close()
-
                 if not frame_results:
                     st.error("No video frames could be analyzed.")
-                    st.stop()
 
-                results_df = pd.DataFrame(frame_results)
-
-                mean_real = float(results_df["real_score"].mean())
-                mean_fake = float(results_df["fake_score"].mean())
-                difference = abs(mean_real - mean_fake)
-
-                if difference < UNCERTAIN_THRESHOLD:
-                    final_verdict = "UNCERTAIN"
-                elif mean_fake > mean_real:
-                    final_verdict = "FAKE"
                 else:
-                    final_verdict = "REAL"
+                    results_df = pd.DataFrame(frame_results)
 
-                st.subheader("Overall video result")
-
-                display_result({
-                    "verdict": final_verdict,
-                    "real_score": mean_real,
-                    "fake_score": mean_fake,
-                    "difference": difference
-                })
-
-                st.write(f"**Frames analyzed:** {sampled_count}")
-
-                if fps is not None:
-                    st.write(f"**Video FPS:** {fps:.3f}")
-                else:
-                    st.write("**Video FPS:** Unavailable")
-
-                if frame_count > 0:
-                    st.write(f"**Frames decoded:** {frame_count}")
-
-                st.subheader("Sampled frame results")
-
-                display_df = results_df.copy()
-                display_df["real_score"] = (
-                    display_df["real_score"] * 100
-                ).round(2)
-                display_df["fake_score"] = (
-                    display_df["fake_score"] * 100
-                ).round(2)
-                display_df["score_difference"] = (
-                    display_df["score_difference"] * 100
-                ).round(2)
-
-                display_df = display_df.rename(columns={
-                    "frame": "Frame",
-                    "timestamp_seconds": "Timestamp (seconds)",
-                    "prediction": "Prediction",
-                    "real_score": "REAL score (%)",
-                    "fake_score": "FAKE score (%)",
-                    "score_difference": "Score difference (%)"
-                })
-
-                st.dataframe(display_df, use_container_width=True)
-
-                report = {
-                    "application": "DEEP-TRACE",
-                    "media_type": "Video",
-                    "filename": uploaded_video.name,
-                    "analysis_time": datetime.now().isoformat(),
-                    "sha256": sha256_hash(video_bytes),
-                    "overall_verdict": final_verdict,
-                    "mean_real_score": mean_real,
-                    "mean_fake_score": mean_fake,
-                    "uncertain_threshold": UNCERTAIN_THRESHOLD,
-                    "video_fps": fps,
-                    "frames_decoded": frame_count,
-                    "frames_analyzed": sampled_count,
-                    "frame_interval": FRAME_INTERVAL,
-                    "frame_results": frame_results,
-                    "disclaimer": (
-                        "The overall result aggregates sampled frame scores. "
-                        "It does not establish that the entire video is real "
-                        "or fake. AI predictions are not conclusive proof."
+                    # Aggregate scores across sampled frames.
+                    mean_real = float(
+                        results_df["real_score"].mean()
                     )
-                }
+                    mean_fake = float(
+                        results_df["fake_score"].mean()
+                    )
 
-                st.markdown("### File integrity")
-                st.code(report["sha256"])
+                    difference = abs(mean_real - mean_fake)
 
-                st.download_button(
-                    "Download forensic report (JSON)",
-                    data=create_report(report),
-                    file_name="deep_trace_video_report.json",
-                    mime="application/json"
-                )
+                    if difference < UNCERTAIN_THRESHOLD:
+                        final_verdict = "UNCERTAIN"
+                    elif mean_fake > mean_real:
+                        final_verdict = "FAKE"
+                    else:
+                        final_verdict = "REAL"
 
-                csv_data = results_df.to_csv(index=False).encode("utf-8")
+                    st.subheader("Overall video result")
 
-                st.download_button(
-                    "Download frame results (CSV)",
-                    data=csv_data,
-                    file_name="deep_trace_video_frames.csv",
-                    mime="text/csv"
-                )
+                    display_result({
+                        "verdict": final_verdict,
+                        "real_score": mean_real,
+                        "fake_score": mean_fake,
+                        "difference": difference
+                    })
+
+                    st.write(
+                        f"**Frames analyzed:** {len(frame_results)}"
+                    )
+                    st.write(
+                        f"**Frames decoded:** {frames_decoded}"
+                    )
+                    st.write(
+                        f"**Video FPS:** "
+                        f"{fps:.3f}" if fps is not None
+                        else "**Video FPS:** Unavailable"
+                    )
+
+                    st.subheader("Sampled frame results")
+
+                    display_df = results_df.copy()
+
+                    display_df["real_score"] = (
+                        display_df["real_score"] * 100
+                    ).round(2)
+
+                    display_df["fake_score"] = (
+                        display_df["fake_score"] * 100
+                    ).round(2)
+
+                    display_df["score_difference"] = (
+                        display_df["score_difference"] * 100
+                    ).round(2)
+
+                    display_df = display_df.rename(columns={
+                        "frame": "Frame",
+                        "timestamp_seconds": "Timestamp (seconds)",
+                        "prediction": "Prediction",
+                        "real_score": "REAL score (%)",
+                        "fake_score": "FAKE score (%)",
+                        "score_difference": "Score difference (%)"
+                    })
+
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True
+                    )
+
+                    report = {
+                        "application": "DEEP-TRACE",
+                        "media_type": "Video",
+                        "filename": uploaded_video.name,
+                        "analysis_time": datetime.now().isoformat(),
+                        "sha256": sha256_hash(video_bytes),
+                        "overall_verdict": final_verdict,
+                        "mean_real_score": mean_real,
+                        "mean_fake_score": mean_fake,
+                        "uncertain_threshold": UNCERTAIN_THRESHOLD,
+                        "video_fps": fps,
+                        "frames_decoded": frames_decoded,
+                        "frames_analyzed": len(frame_results),
+                        "frame_interval": FRAME_INTERVAL,
+                        "frame_results": frame_results,
+                        "disclaimer": (
+                            "The verdict aggregates sampled frame scores. "
+                            "It does not prove the entire video is real "
+                            "or fake."
+                        )
+                    }
+
+                    st.subheader("File integrity")
+                    st.code(report["sha256"])
+
+                    st.download_button(
+                        "Download forensic report (JSON)",
+                        data=report_json(report),
+                        file_name="deep_trace_video_report.json",
+                        mime="application/json"
+                    )
+
+                    csv_data = results_df.to_csv(
+                        index=False
+                    ).encode("utf-8")
+
+                    st.download_button(
+                        "Download frame results (CSV)",
+                        data=csv_data,
+                        file_name="deep_trace_video_frames.csv",
+                        mime="text/csv"
+                    )
 
             except Exception as e:
                 st.error(f"Could not analyze this video: {e}")
                 st.info(
-                    "Try an MP4 video encoded with H.264 if the file "
+                    "Try an MP4 video encoded with H.264 if the video "
                     "cannot be decoded."
                 )
+
+            finally:
+                # Close FFmpeg reader and remove temporary file.
+                if reader is not None:
+                    try:
+                        reader.close()
+                    except Exception:
+                        pass
+
+                if (
+                    temp_video_path is not None
+                    and os.path.exists(temp_video_path)
+                ):
+                    try:
+                        os.remove(temp_video_path)
+                    except OSError:
+                        pass

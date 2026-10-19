@@ -1,3 +1,4 @@
+
 import streamlit as st
 import torch
 from PIL import Image, ImageOps
@@ -9,6 +10,7 @@ import io
 import csv
 from datetime import datetime
 import imageio.v2 as imageio
+import pandas as pd
 
 # ==========================================
 # DEEP-TRACE: Deepfake Detection System
@@ -76,7 +78,6 @@ st.markdown("""
 <div style="color:#aaa;letter-spacing:2px;">
 AI-POWERED MEDIA AUTHENTICITY ANALYSIS
 </div>
-
 <div class="hero">
     <div class="hero-title">
         Is it <span class="accent">REAL</span> or
@@ -102,9 +103,12 @@ def load_model():
         return None, f"Model file not found: {MODEL_PATH}"
 
     try:
-        model = torch.jit.load(MODEL_PATH, map_location="cpu")
-        model.eval()
-        return model, None
+        loaded_model = torch.jit.load(
+            MODEL_PATH,
+            map_location="cpu"
+        )
+        loaded_model.eval()
+        return loaded_model, None
     except Exception as exc:
         return None, str(exc)
 
@@ -180,11 +184,13 @@ def predict_image(image):
 def display_result(verdict, confidence, fake_score, real_score):
     if verdict == "FAKE":
         st.error(
-            f"⚠️ CLASSIFIED AS FAKE — {confidence * 100:.2f}% top-class score"
+            f"⚠️ CLASSIFIED AS FAKE — "
+            f"{confidence * 100:.2f}% top-class score"
         )
     else:
         st.success(
-            f"✓ CLASSIFIED AS REAL — {confidence * 100:.2f}% top-class score"
+            f"✓ CLASSIFIED AS REAL — "
+            f"{confidence * 100:.2f}% top-class score"
         )
 
     col1, col2, col3 = st.columns(3)
@@ -366,6 +372,7 @@ else:
         if st.button("🔍 ANALYZE VIDEO", disabled=model is None):
 
             video_path = None
+            reader = None
             frame_results = []
 
             try:
@@ -379,6 +386,25 @@ else:
                     video_path = temp.name
 
                 reader = imageio.get_reader(video_path)
+
+                # Read video FPS for timestamp calculation.
+                metadata = reader.get_meta_data()
+                fps_value = metadata.get("fps", 0)
+
+                try:
+                    fps = float(fps_value)
+                    if not np.isfinite(fps) or fps <= 0:
+                        fps = None
+                except (TypeError, ValueError):
+                    fps = None
+
+                if fps:
+                    st.caption(f"Video frame rate: {fps:.2f} FPS")
+                else:
+                    st.warning(
+                        "FPS metadata is unavailable. "
+                        "Frame timestamps will show as unavailable."
+                    )
 
                 progress = st.progress(0)
 
@@ -396,17 +422,25 @@ else:
                                     predict_image(frame_image)
                                 )
 
+                                timestamp = (
+                                    round(index / fps, 2)
+                                    if fps is not None
+                                    else "FPS unavailable"
+                                )
+
                                 frame_results.append({
                                     "Frame": index,
-                                    "Timestamp (seconds)": None,
+                                    "Timestamp (seconds)": timestamp,
                                     "Prediction": verdict,
                                     "Top score (%)": round(confidence * 100, 2),
                                     "FAKE score (%)": round(fake_score * 100, 2),
                                     "REAL score (%)": round(real_score * 100, 2),
                                 })
 
-                            except Exception:
-                                pass
+                            except Exception as frame_exc:
+                                st.warning(
+                                    f"Could not analyze frame {index}: {frame_exc}"
+                                )
 
                         if index % 10 == 0:
                             progress.progress(
@@ -415,6 +449,7 @@ else:
 
                 finally:
                     reader.close()
+                    reader = None
 
                 progress.progress(1.0)
 
@@ -430,10 +465,7 @@ else:
                         row["REAL score (%)"] for row in frame_results
                     ])) / 100.0
 
-                    verdict = (
-                        "FAKE" if fake_score > real_score else "REAL"
-                    )
-
+                    verdict = "FAKE" if fake_score > real_score else "REAL"
                     confidence = max(fake_score, real_score)
 
                     display_result(
@@ -445,20 +477,13 @@ else:
 
                     st.subheader("Sampled frame results")
 
-                    # Use a conservative FPS assumption only if the reader
-                    # exposes valid metadata. Otherwise show frame index.
-                    for row in frame_results:
-                        row["Timestamp (seconds)"] = "Not available"
-
                     st.dataframe(
                         frame_results,
                         use_container_width=True,
                         hide_index=True,
                     )
 
-                    # Download CSV results
-                    import pandas as pd
-
+                    # CSV download
                     csv_data = pd.DataFrame(frame_results).to_csv(index=False)
 
                     st.download_button(
@@ -466,6 +491,22 @@ else:
                         csv_data,
                         file_name="deeptrace_frame_results.csv",
                         mime="text/csv",
+                    )
+
+                    # Include frame details in the forensic report.
+                    frame_summary = "\n".join(
+                        f"Frame {row['Frame']} | "
+                        f"Timestamp: {row['Timestamp (seconds)']} | "
+                        f"Prediction: {row['Prediction']} | "
+                        f"FAKE: {row['FAKE score (%)']}% | "
+                        f"REAL: {row['REAL score (%)']}%"
+                        for row in frame_results
+                    )
+
+                    details = (
+                        f"Analyzed {len(frame_results)} sampled frames. "
+                        f"Sampling interval: every {FRAME_SAMPLE_INTERVAL} frames.\n\n"
+                        f"Frame results:\n{frame_summary}"
                     )
 
                     report = create_report(
@@ -476,10 +517,7 @@ else:
                         fake_score,
                         real_score,
                         calculate_hash(raw_data),
-                        (
-                            f"Analyzed {len(frame_results)} sampled frames. "
-                            f"Sampling interval: {FRAME_SAMPLE_INTERVAL}."
-                        ),
+                        details,
                     )
 
                     st.download_button(
@@ -494,6 +532,12 @@ else:
                 st.code(str(exc))
 
             finally:
+                if reader is not None:
+                    try:
+                        reader.close()
+                    except Exception:
+                        pass
+
                 if video_path and os.path.exists(video_path):
                     try:
                         os.remove(video_path)

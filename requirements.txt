@@ -6,3 +6,4 @@ numpy
 imageio
 imageio-ffmpeg
 pandas
+soundfile

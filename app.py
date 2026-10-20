@@ -25,9 +25,8 @@ st.set_page_config(
 
 MODEL_PATH = "deeptrace_model_scripted.pt"
 
-# Lower threshold means fewer UNCERTAIN verdicts.
-# This does not improve the model's underlying accuracy.
-UNCERTAIN_THRESHOLD = 0.10
+# Mark UNCERTAIN only when scores differ by less than 3 percentage points.
+UNCERTAIN_THRESHOLD = 0.03
 
 FRAME_INTERVAL = 15
 MAX_VIDEO_FRAMES = 300
@@ -54,7 +53,6 @@ st.markdown(
     "<h1>DEEP<span style='color:#ef1725'>-</span>TRACE</h1>",
     unsafe_allow_html=True
 )
-
 st.markdown("### AI-POWERED MEDIA AUTHENTICITY ANALYSIS")
 st.markdown("## Is it REAL or FAKE?")
 
@@ -62,7 +60,6 @@ st.write(
     "Analyze images and videos using deep learning. "
     "Review sampled frame predictions and download forensic reports."
 )
-
 st.divider()
 
 
@@ -128,7 +125,6 @@ def predict_image(image):
     # Assumes model output order is [fake, real].
     fake_score = float(scores[0])
     real_score = float(scores[1])
-
     difference = abs(fake_score - real_score)
 
     if difference < UNCERTAIN_THRESHOLD:
@@ -147,8 +143,6 @@ def predict_image(image):
 
 
 def display_result(result):
-    """Display a verdict and its model scores."""
-
     verdict = result["verdict"]
 
     if verdict == "REAL":
@@ -203,10 +197,8 @@ if media_type == "Image":
     )
 
     if uploaded_file is not None:
-
         try:
             file_bytes = uploaded_file.getvalue()
-
             image = Image.open(
                 io.BytesIO(file_bytes)
             ).convert("RGB")
@@ -218,7 +210,6 @@ if media_type == "Image":
             )
 
             if st.button("Analyze image", type="primary"):
-
                 with st.spinner("Analyzing image..."):
                     result = predict_image(image)
 
@@ -236,8 +227,8 @@ if media_type == "Image":
                     "fake_score": result["fake_score"],
                     "uncertain_threshold": UNCERTAIN_THRESHOLD,
                     "disclaimer": (
-                        "AI prediction only; this is not conclusive "
-                        "proof of authenticity or manipulation."
+                        "AI prediction only; not conclusive proof "
+                        "of authenticity or manipulation."
                     )
                 }
 
@@ -265,9 +256,7 @@ else:
     )
 
     if uploaded_video is not None:
-
         video_bytes = uploaded_video.getvalue()
-
         st.video(video_bytes)
 
         if st.button("Analyze video", type="primary"):
@@ -276,13 +265,12 @@ else:
             reader = None
 
             try:
-                # Save the uploaded video to a real temporary file.
-                # FFmpeg can read this path more reliably than BytesIO.
                 suffix = (
                     os.path.splitext(uploaded_video.name)[1]
                     or ".mp4"
                 )
 
+                # Save upload to a real temporary file for FFmpeg.
                 with tempfile.NamedTemporaryFile(
                     suffix=suffix,
                     delete=False
@@ -295,7 +283,6 @@ else:
                 frames_decoded = 0
 
                 with st.spinner("Analyzing sampled video frames..."):
-
                     reader = imageio.get_reader(
                         temp_video_path,
                         format="ffmpeg"
@@ -305,18 +292,15 @@ else:
 
                     try:
                         possible_fps = float(metadata.get("fps"))
-
                         if (
                             np.isfinite(possible_fps)
                             and possible_fps > 0
                         ):
                             fps = possible_fps
-
                     except (TypeError, ValueError):
                         fps = None
 
                     for index, frame in enumerate(reader):
-
                         frames_decoded += 1
 
                         if index % FRAME_INTERVAL != 0:
@@ -358,14 +342,12 @@ else:
                 else:
                     results_df = pd.DataFrame(frame_results)
 
-                    # Aggregate scores across sampled frames.
                     mean_real = float(
                         results_df["real_score"].mean()
                     )
                     mean_fake = float(
                         results_df["fake_score"].mean()
                     )
-
                     difference = abs(mean_real - mean_fake)
 
                     if difference < UNCERTAIN_THRESHOLD:
@@ -376,7 +358,6 @@ else:
                         final_verdict = "REAL"
 
                     st.subheader("Overall video result")
-
                     display_result({
                         "verdict": final_verdict,
                         "real_score": mean_real,
@@ -387,27 +368,22 @@ else:
                     st.write(
                         f"**Frames analyzed:** {len(frame_results)}"
                     )
-                    st.write(
-                        f"**Frames decoded:** {frames_decoded}"
-                    )
-                    st.write(
-                        f"**Video FPS:** "
-                        f"{fps:.3f}" if fps is not None
-                        else "**Video FPS:** Unavailable"
-                    )
+                    st.write(f"**Frames decoded:** {frames_decoded}")
+
+                    if fps is not None:
+                        st.write(f"**Video FPS:** {fps:.3f}")
+                    else:
+                        st.write("**Video FPS:** Unavailable")
 
                     st.subheader("Sampled frame results")
 
                     display_df = results_df.copy()
-
                     display_df["real_score"] = (
                         display_df["real_score"] * 100
                     ).round(2)
-
                     display_df["fake_score"] = (
                         display_df["fake_score"] * 100
                     ).round(2)
-
                     display_df["score_difference"] = (
                         display_df["score_difference"] * 100
                     ).round(2)
@@ -443,7 +419,7 @@ else:
                         "frame_results": frame_results,
                         "disclaimer": (
                             "The verdict aggregates sampled frame scores. "
-                            "It does not prove the entire video is real "
+                            "It is not proof that the entire video is real "
                             "or fake."
                         )
                     }
@@ -472,12 +448,10 @@ else:
             except Exception as e:
                 st.error(f"Could not analyze this video: {e}")
                 st.info(
-                    "Try an MP4 video encoded with H.264 if the video "
-                    "cannot be decoded."
+                    "Try an MP4 video encoded with H.264 if decoding fails."
                 )
 
             finally:
-                # Close FFmpeg reader and remove temporary file.
                 if reader is not None:
                     try:
                         reader.close()

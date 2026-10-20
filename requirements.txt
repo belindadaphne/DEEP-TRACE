@@ -7,3 +7,5 @@ imageio
 imageio-ffmpeg
 pandas
 soundfile
+onnxruntime
+librosa

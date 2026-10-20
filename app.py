@@ -339,5 +339,20 @@ if video_file is not None:
                 "REAL score",
                 f"{real_average * 100:.2f}%"
             )
+                    except Exception as exc:
+            st.error(f"Video analysis failed: {exc}")
+
+        finally:
+            if reader is not None:
+                try:
+                    reader.close()
+                except Exception:
+                    pass
+
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
            

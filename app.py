@@ -15,7 +15,7 @@ from PIL import Image
 from torchvision import transforms
 
 
-# ================= CONFIG =================
+# ================= CONFIGURATION =================
 
 st.set_page_config(
     page_title="DEEP-TRACE",
@@ -59,7 +59,7 @@ st.write(
 st.divider()
 
 
-# ================= LOAD MODEL =================
+# ================= MODEL LOADING =================
 
 @st.cache_resource
 def load_model():
@@ -76,7 +76,7 @@ except Exception as e:
     st.stop()
 
 
-# ================= PREPROCESSING =================
+# ================= IMAGE TRANSFORM =================
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -88,7 +88,7 @@ transform = transforms.Compose([
 ])
 
 
-# ================= PREDICTION =================
+# ================= HELPER FUNCTIONS =================
 
 def sha256_hash(data):
     return hashlib.sha256(data).hexdigest()
@@ -108,12 +108,13 @@ def predict_image(image):
 
         if output.numel() != 2:
             raise ValueError(
-                f"Expected 2 outputs, received {output.numel()}."
+                f"Expected two model outputs, got {output.numel()}."
             )
 
         scores = torch.softmax(output, dim=0).cpu().numpy()
 
-    # Assumes the model output order is [fake, real].
+    # Assumption: model output index 0 = fake, index 1 = real.
+    # Verify this against the original training labels.
     fake_score = float(scores[0])
     real_score = float(scores[1])
     difference = abs(fake_score - real_score)
@@ -167,7 +168,7 @@ media_type = st.radio(
 )
 
 
-# ================= IMAGE ANALYSIS =================
+# ================= IMAGE DETECTION =================
 
 if media_type == "Image":
 
@@ -224,7 +225,7 @@ if media_type == "Image":
             st.error(f"Could not analyze image: {e}")
 
 
-# ================= VIDEO ANALYSIS =================
+# ================= VIDEO DETECTION =================
 
 else:
 
@@ -238,17 +239,15 @@ else:
         st.video(video_bytes)
 
         if st.button("Analyze video", type="primary"):
-
             temp_video_path = None
             reader = None
 
             try:
                 suffix = (
-                    os.path.splitext(uploaded_video.name)[1]
-                    or ".mp4"
+                    os.path.splitext(uploaded_video.name)[1] or ".mp4"
                 )
 
-                # FFmpeg reads a real temporary file.
+                # Save upload as a real file for FFmpeg.
                 with tempfile.NamedTemporaryFile(
                     suffix=suffix,
                     delete=False
@@ -261,7 +260,6 @@ else:
                 frames_decoded = 0
 
                 with st.spinner("Analyzing sampled video frames..."):
-
                     reader = imageio.get_reader(
                         temp_video_path,
                         format="ffmpeg"
@@ -292,8 +290,7 @@ else:
 
                         timestamp = (
                             round(index / fps, 3)
-                            if fps is not None
-                            else None
+                            if fps is not None else None
                         )
 
                         frame_results.append({
@@ -378,8 +375,8 @@ else:
                         "frame_interval": FRAME_INTERVAL,
                         "frame_results": frame_results,
                         "disclaimer": (
-                            "The result aggregates sampled frames and is "
-                            "not conclusive proof of authenticity."
+                            "This verdict aggregates sampled frames. "
+                            "It is not conclusive proof of authenticity."
                         )
                     }
 

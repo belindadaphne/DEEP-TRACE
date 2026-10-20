@@ -191,4 +191,4 @@ if video_file:
             reader = imageio.get_reader(temp_path, format="ffmpeg")
             metadata = reader.get_meta_data()
             fps = float(metadata.get("fps") or 0)
-            every = max(1, round
+            every = max(1, round(fps * 0.5)) if fps > 0 else 15

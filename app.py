@@ -14,6 +14,11 @@ import imageio.v2 as imageio
 from PIL import Image
 from torchvision import transforms
 
+# Audio detection dependencies
+import onnxruntime as ort
+import librosa
+from huggingface_hub import hf_hub_download
+
 # ---------------- CONFIGURATION ----------------
 st.set_page_config(
     page_title="DEEP-TRACE",
@@ -22,32 +27,43 @@ st.set_page_config(
 )
 
 MODEL_PATH = "deeptrace_model_scripted.pt"
+AUDIO_REPO_ID = "deeptrace-research/deep-trace-audio"
+AUDIO_MODEL_FILENAME = "best_model.onnx"
+
 FAKE_INDEX = 0
 REAL_INDEX = 1
+AUDIO_FAKE_INDEX = 1
+
 UNCERTAIN_MARGIN = 0.10
 MAX_VIDEO_FRAMES = 10
 FRAME_INTERVAL = 15
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_MAX_LENGTH = 48000
 
 st.title("🔎 DEEP-TRACE")
 st.caption("AI-assisted deepfake screening")
 
-# ---------------- MODEL ----------------
+# ---------------- IMAGE / VIDEO MODEL ----------------
 @st.cache_resource
 def load_model():
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(
             f"Model file not found: {MODEL_PATH}"
         )
-    model = torch.jit.load(MODEL_PATH, map_location="cpu")
-    model.eval()
-    return model
+    loaded_model = torch.jit.load(
+        MODEL_PATH, map_location="cpu"
+    )
+    loaded_model.eval()
+    return loaded_model
+
 
 try:
     model = load_model()
-    st.success("Detection model loaded")
+    st.success("Image/video detection model loaded")
 except Exception as e:
-    st.error(f"Could not load model: {e}")
+    st.error(f"Could not load image/video model: {e}")
     st.stop()
+
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -110,8 +126,14 @@ def show_result(result):
         st.warning("Verdict: UNCERTAIN")
 
     col1, col2 = st.columns(2)
-    col1.metric("REAL score", f'{result["real_score"] * 100:.2f}%')
-    col2.metric("FAKE score", f'{result["fake_score"] * 100:.2f}%')
+    col1.metric(
+        "REAL score",
+        f'{result["real_score"] * 100:.2f}%'
+    )
+    col2.metric(
+        "FAKE score",
+        f'{result["fake_score"] * 100:.2f}%'
+    )
 
     st.caption(
         "Scores are model outputs, not guaranteed calibrated "
@@ -119,13 +141,131 @@ def show_result(result):
     )
 
 
+# ---------------- AUDIO MODEL ----------------
+@st.cache_resource
+def load_audio_model():
+    token = st.secrets.get("HF_TOKEN")
+
+    if not token:
+        raise RuntimeError(
+            "HF_TOKEN is missing. Add it in Streamlit "
+            "App settings > Secrets."
+        )
+
+    model_file = hf_hub_download(
+        repo_id=AUDIO_REPO_ID,
+        filename=AUDIO_MODEL_FILENAME,
+        token=token
+    )
+
+    session = ort.InferenceSession(
+        model_file,
+        providers=["CPUExecutionProvider"]
+    )
+
+    return session
+
+
+def predict_audio(audio_bytes, filename):
+    temp_path = None
+
+    try:
+        suffix = os.path.splitext(filename)[1] or ".wav"
+
+        with tempfile.NamedTemporaryFile(
+            suffix=suffix, delete=False
+        ) as temp_file:
+            temp_file.write(audio_bytes)
+            temp_path = temp_file.name
+
+        audio, sr = librosa.load(
+            temp_path,
+            sr=AUDIO_SAMPLE_RATE,
+            mono=True
+        )
+
+        if len(audio) == 0:
+            raise ValueError("The audio file is empty.")
+
+        duration = len(audio) / AUDIO_SAMPLE_RATE
+
+        # Model expects 3 seconds at 16 kHz
+        if len(audio) > AUDIO_MAX_LENGTH:
+            audio = audio[:AUDIO_MAX_LENGTH]
+        elif len(audio) < AUDIO_MAX_LENGTH:
+            audio = np.pad(
+                audio,
+                (0, AUDIO_MAX_LENGTH - len(audio))
+            )
+
+        # Match the model card's preprocessing
+        audio = (
+            audio - np.mean(audio)
+        ) / np.sqrt(np.var(audio) + 1e-5)
+
+        audio = audio.astype(np.float32).reshape(
+            1, AUDIO_MAX_LENGTH
+        )
+
+        session = load_audio_model()
+        input_name = session.get_inputs()[0].name
+
+        outputs = session.run(
+            None, {input_name: audio}
+        )
+
+        logits = np.asarray(outputs[0]).reshape(1, -1)
+
+        # Convert logits to probabilities safely
+        shifted = logits - np.max(logits, axis=1, keepdims=True)
+        exp_scores = np.exp(shifted)
+        probs = exp_scores / np.sum(
+            exp_scores, axis=1, keepdims=True
+        )
+
+        if probs.shape[1] <= AUDIO_FAKE_INDEX:
+            raise ValueError(
+                "Unexpected output shape from the audio model."
+            )
+
+        fake_score = float(probs[0, AUDIO_FAKE_INDEX])
+        real_score = 1.0 - fake_score
+
+        difference = abs(real_score - fake_score)
+
+        if difference < UNCERTAIN_MARGIN:
+            verdict = "UNCERTAIN"
+        elif fake_score > real_score:
+            verdict = "FAKE"
+        else:
+            verdict = "REAL"
+
+        return {
+            "verdict": verdict,
+            "real_score": real_score,
+            "fake_score": fake_score,
+            "duration_seconds": round(duration, 2),
+            "sample_rate": AUDIO_SAMPLE_RATE
+        }
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 # ---------------- INPUT ----------------
 mode = st.radio(
     "Choose analysis type",
-    ["Image detection", "Video detection"],
+    [
+        "Image detection",
+        "Video detection",
+        "Audio detection"
+    ],
     horizontal=True
 )
 
+
+# ---------------- IMAGE DETECTION ----------------
 if mode == "Image detection":
     uploaded = st.file_uploader(
         "Upload an image",
@@ -135,7 +275,11 @@ if mode == "Image detection":
     if uploaded is not None:
         data = uploaded.getvalue()
         image = Image.open(io.BytesIO(data))
-        st.image(image, caption="Uploaded image", use_container_width=True)
+        st.image(
+            image,
+            caption="Uploaded image",
+            use_container_width=True
+        )
 
         if st.button("Analyze image", type="primary"):
             try:
@@ -159,11 +303,13 @@ if mode == "Image detection":
                     file_name="deeptrace_image_report.json",
                     mime="application/json"
                 )
+
             except Exception as e:
                 st.error(f"Image analysis failed: {e}")
 
 
-else:
+# ---------------- VIDEO DETECTION ----------------
+elif mode == "Video detection":
     uploaded = st.file_uploader(
         "Upload a video",
         type=["mp4", "mov", "avi", "mkv"]
@@ -179,7 +325,8 @@ else:
 
             try:
                 with tempfile.NamedTemporaryFile(
-                    suffix=os.path.splitext(uploaded.name)[1] or ".mp4",
+                    suffix=os.path.splitext(uploaded.name)[1]
+                    or ".mp4",
                     delete=False
                 ) as temp_file:
                     temp_file.write(video_data)
@@ -187,10 +334,11 @@ else:
 
                 rows = []
 
-                with st.spinner("Extracting and analyzing video frames..."):
+                with st.spinner(
+                    "Extracting and analyzing video frames..."
+                ):
                     reader = imageio.get_reader(
-                        temp_path,
-                        format="ffmpeg"
+                        temp_path, format="ffmpeg"
                     )
 
                     metadata = reader.get_meta_data()
@@ -215,7 +363,9 @@ else:
 
                         rows.append({
                             "Frame": index,
-                            "Timestamp (seconds)": round(timestamp, 2),
+                            "Timestamp (seconds)": round(
+                                timestamp, 2
+                            ),
                             "Prediction": result["verdict"],
                             "REAL score (%)": round(
                                 result["real_score"] * 100, 2
@@ -246,7 +396,9 @@ else:
                         results_df["FAKE score (%)"].mean() / 100
                     )
 
-                    difference = abs(real_average - fake_average)
+                    difference = abs(
+                        real_average - fake_average
+                    )
 
                     if difference < UNCERTAIN_MARGIN:
                         overall_verdict = "UNCERTAIN"
@@ -322,8 +474,84 @@ else:
                     except Exception:
                         pass
 
+
+# ---------------- AUDIO DETECTION ----------------
+else:
+    st.subheader("🎙️ Audio deepfake detection")
+    st.write(
+        "Upload a WAV, FLAC, or MP3 file to screen it "
+        "with the audio model."
+    )
+
+    uploaded = st.file_uploader(
+        "Upload an audio file",
+        type=["wav", "flac", "mp3"],
+        key="audio_upload"
+    )
+
+    if uploaded is not None:
+        audio_bytes = uploaded.getvalue()
+
+        st.audio(audio_bytes)
+
+        st.write(f"**File:** {uploaded.name}")
+        st.write(f"**Size:** {len(audio_bytes) / 1024:.1f} KB")
+        st.write(f"**SHA-256:** `{file_hash(audio_bytes)}`")
+
+        if st.button("Analyze audio", type="primary"):
+            try:
+                with st.spinner(
+                    "Loading audio model and analyzing audio..."
+                ):
+                    result = predict_audio(
+                        audio_bytes, uploaded.name
+                    )
+
+                st.subheader("Audio analysis result")
+                show_result(result)
+
+                st.write(
+                    f"Duration: {result['duration_seconds']} seconds"
+                )
+                st.write(
+                    f"Model sample rate: "
+                    f"{result['sample_rate']} Hz"
+                )
+
+                report = {
+                    "file_name": uploaded.name,
+                    "file_sha256": file_hash(audio_bytes),
+                    "analysis_time_utc": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                    "model_repo": AUDIO_REPO_ID,
+                    "result": result,
+                    "disclaimer": (
+                        "AI screening only; not definitive proof "
+                        "of authenticity."
+                    )
+                }
+
+                st.download_button(
+                    "Download audio forensic report (JSON)",
+                    json.dumps(report, indent=2),
+                    file_name="deeptrace_audio_report.json",
+                    mime="application/json"
+                )
+
+            except Exception as e:
+                st.error(f"Audio analysis failed: {e}")
+                st.info(
+                    "Check that HF_TOKEN is configured in "
+                    "Streamlit Secrets, the model file exists "
+                    "in your Hugging Face repository, and all "
+                    "audio dependencies are installed."
+                )
+
+
+# ---------------- FOOTER ----------------
 st.divider()
 st.caption(
-    "DEEP-TRACE is an AI screening tool. Its predictions can be "
-    "wrong and should not be treated as definitive proof."
+    "DEEP-TRACE is an AI screening tool. Its predictions "
+    "can be wrong and should not be treated as definitive proof."
 )

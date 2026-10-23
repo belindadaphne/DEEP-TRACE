@@ -1,3 +1,4 @@
+
 streamlit
 torch
 torchvision
@@ -6,6 +7,7 @@ numpy
 imageio
 imageio-ffmpeg
 pandas
-soundfile
 onnxruntime
 librosa
+huggingface_hub
+soundfile

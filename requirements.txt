@@ -11,3 +11,4 @@ onnxruntime
 librosa
 huggingface_hub
 soundfile
+openpyxl

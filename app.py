@@ -20,15 +20,14 @@ from huggingface_hub import hf_hub_download
 
 
 # =========================================================
-# CONFIGURATION
+# CONFIG
 # =========================================================
 
 IMAGE_MODEL_PATH = "deeptrace_model_scripted.pt"
-
 AUDIO_REPO_ID = "deeptrace-research/deep-trace-audio"
 AUDIO_MODEL_FILENAME = "best_model.onnx"
 
-# Verify these indices against your model's training labels.
+# Verify these indices against the models' training labels.
 FAKE_INDEX = 0
 REAL_INDEX = 1
 AUDIO_FAKE_INDEX = 1
@@ -36,20 +35,19 @@ AUDIO_FAKE_INDEX = 1
 UNCERTAIN_MARGIN = 0.10
 MAX_VIDEO_FRAMES = 10
 FRAME_INTERVAL = 15
-
 SAMPLE_RATE = 16000
 AUDIO_SAMPLES = 48000  # 3 seconds
+
+
+# =========================================================
+# PAGE + NETFLIX FORENSIC THEME
+# =========================================================
 
 st.set_page_config(
     page_title="DEEP-TRACE | Forensic Lab",
     page_icon="🔎",
     layout="wide"
 )
-
-
-# =========================================================
-# NETFLIX-INSPIRED FORENSIC THEME
-# =========================================================
 
 st.markdown("""
 <style>
@@ -153,9 +151,6 @@ st.markdown("""
         IMAGE ANALYSIS / VIDEO ANALYSIS / AUDIO ANALYSIS
     </div>
 </div>
-""", unsafe_allow_html=True)
-
-st.markdown("""
 <div style="background:#171012;border-left:4px solid #e50914;
 padding:10px 14px;border-radius:5px;color:#d8c8c8;font-size:13px;">
 FORENSIC NOTICE: AI predictions are estimates, not conclusive proof.
@@ -171,13 +166,10 @@ FORENSIC NOTICE: AI predictions are estimates, not conclusive proof.
 def load_image_model():
     if not os.path.exists(IMAGE_MODEL_PATH):
         raise FileNotFoundError(
-            f"Missing {IMAGE_MODEL_PATH}. Add it to your GitHub repository."
+            f"Missing {IMAGE_MODEL_PATH}. Add it to your repository."
         )
 
-    model = torch.jit.load(
-        IMAGE_MODEL_PATH,
-        map_location="cpu"
-    )
+    model = torch.jit.load(IMAGE_MODEL_PATH, map_location="cpu")
     model.eval()
     return model
 
@@ -192,16 +184,15 @@ image_transform = transforms.Compose([
 ])
 
 
-def get_prediction_label(real_score, fake_score):
-    if abs(fake_score - real_score) < UNCERTAIN_MARGIN:
+def prediction_label(real_score, fake_score):
+    if abs(real_score - fake_score) < UNCERTAIN_MARGIN:
         return "UNCERTAIN"
     return "FAKE" if fake_score > real_score else "REAL"
 
 
 def predict_image(image):
     model = load_image_model()
-    image = image.convert("RGB")
-    tensor = image_transform(image).unsqueeze(0)
+    tensor = image_transform(image.convert("RGB")).unsqueeze(0)
 
     with torch.inference_mode():
         output = model(tensor)
@@ -215,16 +206,16 @@ def predict_image(image):
             fake_score = float(torch.sigmoid(output).item())
             real_score = 1.0 - fake_score
         else:
-            probabilities = F.softmax(output.reshape(1, -1), dim=1)[0]
+            probs = F.softmax(output.reshape(1, -1), dim=1)[0]
 
-            if len(probabilities) <= max(FAKE_INDEX, REAL_INDEX):
-                raise ValueError("The image model returned unexpected output.")
+            if len(probs) <= max(FAKE_INDEX, REAL_INDEX):
+                raise ValueError("Unexpected image model output shape.")
 
-            fake_score = float(probabilities[FAKE_INDEX])
-            real_score = float(probabilities[REAL_INDEX])
+            fake_score = float(probs[FAKE_INDEX])
+            real_score = float(probs[REAL_INDEX])
 
     return {
-        "label": get_prediction_label(real_score, fake_score),
+        "label": prediction_label(real_score, fake_score),
         "real_score": round(real_score * 100, 2),
         "fake_score": round(fake_score * 100, 2)
     }
@@ -267,18 +258,13 @@ def predict_audio_file(audio_path):
     if audio.size == 0:
         raise ValueError("No usable audio was found.")
 
-    # Use a fixed-length audio segment.
     if len(audio) < AUDIO_SAMPLES:
         audio = np.pad(audio, (0, AUDIO_SAMPLES - len(audio)))
     else:
         audio = audio[:AUDIO_SAMPLES]
 
     audio = audio.astype(np.float32)
-
-    # Match the preprocessing used by your existing implementation.
-    audio = (audio - audio.mean()) / (
-        np.sqrt(audio.var() + 1e-5)
-    )
+    audio = (audio - audio.mean()) / np.sqrt(audio.var() + 1e-5)
 
     model_input_info = session.get_inputs()[0]
     input_name = model_input_info.name
@@ -292,7 +278,7 @@ def predict_audio_file(audio_path):
         model_input = audio[np.newaxis, np.newaxis, :]
     else:
         raise ValueError(
-            f"Unsupported audio model input shape: {input_shape}"
+            f"Unsupported ONNX input shape: {input_shape}"
         )
 
     outputs = session.run(
@@ -301,36 +287,59 @@ def predict_audio_file(audio_path):
     )
 
     if not outputs:
-        raise ValueError("The audio model returned no output.")
+        raise ValueError("Audio model returned no output.")
 
-    logits = np.asarray(outputs[0]).squeeze()
+    values = np.asarray(outputs[0]).squeeze()
 
-    if logits.size == 1:
-        value = float(logits.reshape(-1)[0])
-        fake_score = float(1 / (1 + np.exp(-np.clip(value, -80, 80))))
+    if values.size == 1:
+        value = float(values.reshape(-1)[0])
+        fake_score = float(
+            1.0 / (1.0 + np.exp(-np.clip(value, -80, 80)))
+        )
         real_score = 1.0 - fake_score
     else:
-        logits = logits.reshape(-1).astype(np.float64)
-        logits -= np.max(logits)
-        probabilities = np.exp(logits)
-        probabilities /= probabilities.sum()
+        values = values.reshape(-1).astype(np.float64)
+        values -= np.max(values)
+        probs = np.exp(values)
+        probs /= probs.sum()
 
-        if AUDIO_FAKE_INDEX >= len(probabilities):
-            raise ValueError("Audio class index does not match model output.")
+        if len(probs) != 2:
+            raise ValueError(
+                f"Expected 2 audio classes; model returned {len(probs)}. "
+                "Check the model's expected output labels."
+            )
 
-        fake_score = float(probabilities[AUDIO_FAKE_INDEX])
-        real_index = 1 - AUDIO_FAKE_INDEX
-
-        if real_index < 0 or real_index >= len(probabilities):
-            raise ValueError("Audio real/fake class mapping needs verification.")
-
-        real_score = float(probabilities[real_index])
+        fake_score = float(probs[AUDIO_FAKE_INDEX])
+        real_score = float(probs[1 - AUDIO_FAKE_INDEX])
 
     return {
-        "label": get_prediction_label(real_score, fake_score),
+        "label": prediction_label(real_score, fake_score),
         "real_score": round(real_score * 100, 2),
         "fake_score": round(fake_score * 100, 2)
     }
+
+
+# =========================================================
+# SHARED RESULT DISPLAY
+# =========================================================
+
+def show_prediction(result):
+    label = result["label"]
+
+    if label == "FAKE":
+        st.error("🔴 Prediction: FAKE")
+    elif label == "REAL":
+        st.success("🟢 Prediction: REAL")
+    else:
+        st.warning("🟡 Prediction: UNCERTAIN")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.metric("Fake score", f"{result['fake_score']:.2f}%")
+
+    with col2:
+        st.metric("Real score", f"{result['real_score']:.2f}%")
 
 
 # =========================================================
@@ -360,44 +369,40 @@ def extract_audio_from_video(video_path, audio_path):
 
     if result.returncode != 0 or not os.path.exists(audio_path):
         raise RuntimeError(
-            "No readable audio track was found in this video."
+            "No readable audio track found. This video may have no sound."
         )
 
     if os.path.getsize(audio_path) == 0:
         raise RuntimeError("The extracted audio track is empty.")
 
 
-def analyse_video_frames(video_path, progress_bar):
+def analyze_video_frames(video_path, progress):
     reader = imageio.get_reader(video_path)
     results = []
 
     try:
         try:
             total_frames = reader.count_frames()
-        except Exception:
-            total_frames = None
-
-        if total_frames is not None:
-            frame_indices = list(
+            indices = list(
                 range(0, total_frames, FRAME_INTERVAL)
             )[:MAX_VIDEO_FRAMES]
-        else:
-            frame_indices = list(range(MAX_VIDEO_FRAMES))
+        except Exception:
+            indices = list(range(MAX_VIDEO_FRAMES))
 
-        for position, frame_number in enumerate(frame_indices):
+        for position, frame_number in enumerate(indices):
             try:
                 frame = reader.get_data(frame_number)
                 frame_image = Image.fromarray(
                     np.asarray(frame).astype(np.uint8)
                 ).convert("RGB")
 
-                prediction = predict_image(frame_image)
+                result = predict_image(frame_image)
 
                 results.append({
                     "Frame": frame_number,
-                    "Prediction": prediction["label"],
-                    "Real score (%)": prediction["real_score"],
-                    "Fake score (%)": prediction["fake_score"]
+                    "Prediction": result["label"],
+                    "Real score (%)": result["real_score"],
+                    "Fake score (%)": result["fake_score"]
                 })
 
             except Exception as error:
@@ -409,8 +414,8 @@ def analyse_video_frames(video_path, progress_bar):
                     "Error": str(error)
                 })
 
-            progress_bar.progress(
-                min((position + 1) / max(len(frame_indices), 1), 1.0)
+            progress.progress(
+                min((position + 1) / max(len(indices), 1), 1.0)
             )
 
     finally:
@@ -419,51 +424,32 @@ def analyse_video_frames(video_path, progress_bar):
     return pd.DataFrame(results)
 
 
-def show_prediction(result):
-    st.subheader(f"Result: {result['label']}")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.metric("Fake score", f"{result['fake_score']}%")
-
-    with col2:
-        st.metric("Real score", f"{result['real_score']}%")
-
-
-def show_video_downloads(results_df, filename_prefix):
+def show_frame_downloads(df):
     st.download_button(
         "⬇ Download CSV",
-        data=results_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"{filename_prefix}.csv",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="deeptrace_video_frames.csv",
         mime="text/csv"
     )
 
     try:
-        excel_buffer = io.BytesIO()
+        buffer = io.BytesIO()
 
-        with pd.ExcelWriter(
-            excel_buffer,
-            engine="openpyxl"
-        ) as writer:
-            results_df.to_excel(
-                writer,
-                index=False,
-                sheet_name="Frame Results"
-            )
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Frame Results")
 
         st.download_button(
             "⬇ Download Excel",
-            data=excel_buffer.getvalue(),
-            file_name=f"{filename_prefix}.xlsx",
+            data=buffer.getvalue(),
+            file_name="deeptrace_video_frames.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     except Exception:
-        st.caption("Excel export unavailable; use the CSV download.")
+        st.caption("Excel export unavailable. CSV is available.")
 
 
 # =========================================================
-# DETECTION TABS
+# TABS
 # =========================================================
 
 image_tab, video_tab, audio_tab = st.tabs([
@@ -473,15 +459,17 @@ image_tab, video_tab, audio_tab = st.tabs([
 ])
 
 
-# ---------------- IMAGE DETECTION ----------------
+# =========================================================
+# IMAGE TAB
+# =========================================================
 
 with image_tab:
     st.subheader("Image authenticity analysis")
 
     uploaded_image = st.file_uploader(
-        "Upload an image",
+        "Upload JPG, PNG, WEBP, or BMP",
         type=["jpg", "jpeg", "png", "webp", "bmp"],
-        key="image_file"
+        key="image_upload"
     )
 
     if uploaded_image is not None:
@@ -489,25 +477,26 @@ with image_tab:
             image = Image.open(uploaded_image).convert("RGB")
             st.image(image, caption="Evidence image", width=500)
 
-            if st.button("🔎 Analyze image", key="run_image"):
-                with st.spinner("Examining image..."):
+            if st.button("🔎 Analyze image", key="analyze_image"):
+                with st.spinner("Analyzing image..."):
                     result = predict_image(image)
-
                 show_prediction(result)
 
         except Exception as error:
             st.error(f"Image analysis failed: {error}")
 
 
-# ---------------- VIDEO DETECTION ----------------
+# =========================================================
+# VIDEO TAB
+# =========================================================
 
 with video_tab:
     st.subheader("Video authenticity analysis")
 
     uploaded_video = st.file_uploader(
-        "Upload a video",
+        "Upload MP4, MOV, AVI, MKV, or WEBM",
         type=["mp4", "mov", "avi", "mkv", "webm"],
-        key="video_file"
+        key="video_upload"
     )
 
     analyze_frames = st.checkbox(
@@ -516,14 +505,14 @@ with video_tab:
     )
 
     analyze_video_audio = st.checkbox(
-        "Also analyze audio, if the video has an audio track",
+        "Also analyze audio if the video contains sound",
         value=False
     )
 
     if uploaded_video is not None:
         st.video(uploaded_video)
 
-        if st.button("🔎 Analyze video", key="run_video"):
+        if st.button("🔎 Analyze video", key="analyze_video"):
             video_path = None
             audio_path = None
 
@@ -542,56 +531,42 @@ with video_tab:
                     progress = st.progress(0)
 
                     with st.spinner("Analyzing sampled frames..."):
-                        results_df = analyse_video_frames(
-                            video_path,
-                            progress
-                        )
+                        df = analyze_video_frames(video_path, progress)
 
                     progress.empty()
 
-                    if results_df.empty:
-                        st.warning("No frames could be analyzed.")
+                    if df.empty:
+                        st.warning("No video frames could be analyzed.")
                     else:
-                        st.dataframe(
-                            results_df,
-                            use_container_width=True
-                        )
+                        st.dataframe(df, use_container_width=True)
 
-                        valid = results_df[
-                            results_df["Prediction"].isin(["REAL", "FAKE"])
-                        ]
+                        valid = df[df["Prediction"].isin(["REAL", "FAKE"])]
 
-                        if not valid.empty:
-                            fake_count = int(
-                                (valid["Prediction"] == "FAKE").sum()
-                            )
-                            real_count = int(
-                                (valid["Prediction"] == "REAL").sum()
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.metric(
+                                "Frames labelled fake",
+                                int((valid["Prediction"] == "FAKE").sum())
                             )
 
-                            col1, col2 = st.columns(2)
+                        with col2:
+                            st.metric(
+                                "Frames labelled real",
+                                int((valid["Prediction"] == "REAL").sum())
+                            )
 
-                            with col1:
-                                st.metric("Frames labelled fake", fake_count)
-
-                            with col2:
-                                st.metric("Frames labelled real", real_count)
-
-                        show_video_downloads(
-                            results_df,
-                            "deeptrace_video_frames"
-                        )
+                        show_frame_downloads(df)
 
                 if analyze_video_audio:
-                    st.write("**Audio track analysis**")
+                    st.subheader("🎙️ Audio track analysis")
                     audio_path = video_path + ".wav"
 
                     try:
-                        with st.spinner("Extracting video audio..."):
-                            extract_audio_from_video(
-                                video_path,
-                                audio_path
-                            )
+                        with st.spinner("Extracting audio from video..."):
+                            extract_audio_from_video(video_path, audio_path)
+
+                        st.success("Audio extracted. Running detection...")
 
                         with st.spinner("Analyzing audio..."):
                             audio_result = predict_audio_file(audio_path)
@@ -599,23 +574,20 @@ with video_tab:
                         show_prediction(audio_result)
 
                     except Exception as audio_error:
+                        st.error("Audio analysis could not be completed.")
+                        st.code(str(audio_error))
                         st.info(
-                            "Audio analysis was skipped or failed. "
-                            "Frame analysis remains available."
+                            "The video may not contain audio. Frame analysis "
+                            "can still work. Try a separate WAV or MP3 in "
+                            "the Audio Forensics tab."
                         )
-                        st.caption(str(audio_error))
-
-                report = {
-                    "video_filename": uploaded_video.name,
-                    "note": (
-                        "Results describe sampled frames and are not "
-                        "conclusive proof of authenticity."
-                    )
-                }
 
                 st.download_button(
                     "⬇ Download JSON report",
-                    data=json.dumps(report, indent=2),
+                    data=json.dumps({
+                        "video_filename": uploaded_video.name,
+                        "note": "Sampled frame predictions are not proof of authenticity."
+                    }, indent=2),
                     file_name="deeptrace_report.json",
                     mime="application/json"
                 )
@@ -632,21 +604,23 @@ with video_tab:
                             pass
 
 
-# ---------------- AUDIO DETECTION ----------------
+# =========================================================
+# AUDIO TAB
+# =========================================================
 
 with audio_tab:
     st.subheader("Audio authenticity analysis")
 
     uploaded_audio = st.file_uploader(
-        "Upload an audio recording",
+        "Upload WAV, MP3, FLAC, M4A, or OGG",
         type=["wav", "mp3", "flac", "m4a", "ogg"],
-        key="audio_file"
+        key="audio_upload"
     )
 
     if uploaded_audio is not None:
         st.audio(uploaded_audio)
 
-        if st.button("🔎 Analyze audio", key="run_audio"):
+        if st.button("🔎 Analyze audio", key="analyze_audio"):
             audio_path = None
 
             try:
@@ -659,19 +633,19 @@ with audio_tab:
                     temp_audio.write(uploaded_audio.getbuffer())
                     audio_path = temp_audio.name
 
-                with st.spinner("Examining audio..."):
+                with st.spinner("Analyzing audio..."):
                     result = predict_audio_file(audio_path)
 
                 show_prediction(result)
 
                 st.caption(
-                    "The current audio model analyzes a fixed three-second "
-                    "segment. Results depend on the model's training and "
-                    "class-label mapping."
+                    "The model analyzes a three-second audio segment. "
+                    "Confirm its class mapping before relying on predictions."
                 )
 
             except Exception as error:
                 st.error(f"Audio analysis failed: {error}")
+                st.code(str(error))
 
             finally:
                 if audio_path and os.path.exists(audio_path):
@@ -681,7 +655,9 @@ with audio_tab:
                         pass
 
 
-# ---------------- FOOTER ----------------
+# =========================================================
+# FOOTER
+# =========================================================
 
 st.markdown("""
 <hr>

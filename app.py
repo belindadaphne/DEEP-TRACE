@@ -1,45 +1,30 @@
 
 import os
-import io
 import json
-import hashlib
 import tempfile
 import subprocess
-from datetime import datetime, timezone
 
 import streamlit as st
 import torch
+import torch.nn.functional as F
+import torchvision.transforms as transforms
+from PIL import Image
 import numpy as np
 import pandas as pd
 import imageio.v2 as imageio
 import imageio_ffmpeg
-from PIL import Image
-from torchvision import transforms
-import onnxruntime as ort
 import librosa
+import onnxruntime as ort
 from huggingface_hub import hf_hub_download
 
 
-# =========================================================
-# CONFIGURATION
-# =========================================================
-
-st.set_page_config(
-    page_title="DEEP-TRACE",
-    page_icon="🔎",
-    layout="wide"
-)
-
-MODEL_PATH = "deeptrace_model_scripted.pt"
+# ---------------- CONFIG ----------------
 
 AUDIO_REPO_ID = "deeptrace-research/deep-trace-audio"
 AUDIO_MODEL_FILENAME = "best_model.onnx"
 
 FAKE_INDEX = 0
 REAL_INDEX = 1
-
-# Keep the existing audio output assumption from your original code.
-# Verify the audio class order against the model documentation.
 AUDIO_FAKE_INDEX = 1
 
 UNCERTAIN_MARGIN = 0.10
@@ -47,41 +32,42 @@ MAX_VIDEO_FRAMES = 10
 FRAME_INTERVAL = 15
 
 AUDIO_SAMPLE_RATE = 16000
-AUDIO_MAX_LENGTH = 48000
+AUDIO_MAX_LENGTH = 48000  # 3 seconds
+
+
+# ---------------- PAGE ----------------
+
+st.set_page_config(
+    page_title="DEEP-TRACE",
+    page_icon="🔎",
+    layout="wide"
+)
 
 st.title("🔎 DEEP-TRACE")
-st.caption("AI-assisted deepfake screening")
+st.write("AI-assisted image, video, and audio authenticity analysis.")
+st.warning(
+    "Predictions are estimates, not proof that media is real or fake. "
+    "Low-confidence results should be treated as inconclusive."
+)
 
 
-# =========================================================
-# LOAD IMAGE / VIDEO MODEL
-# =========================================================
+# ---------------- IMAGE MODEL ----------------
 
 @st.cache_resource
 def load_model():
-    if not os.path.exists(MODEL_PATH):
+    model_path = "deeptrace_model_scripted.pt"
+
+    if not os.path.exists(model_path):
         raise FileNotFoundError(
-            f"Model file not found: {MODEL_PATH}"
+            f"Missing {model_path}. Add the model file to your repository."
         )
 
-    loaded_model = torch.jit.load(
-        MODEL_PATH,
-        map_location="cpu"
-    )
-    loaded_model.eval()
-    return loaded_model
+    model = torch.jit.load(model_path, map_location="cpu")
+    model.eval()
+    return model
 
 
-try:
-    model = load_model()
-    st.success("Image/video detection model loaded")
-except Exception as e:
-    st.error(f"Could not load image/video model: {e}")
-    st.stop()
-
-
-# Keep your original image preprocessing unchanged.
-transform = transforms.Compose([
+image_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize(
@@ -91,13 +77,24 @@ transform = transforms.Compose([
 ])
 
 
-# =========================================================
-# IMAGE PREDICTION
-# =========================================================
+def classify_scores(real_score, fake_score):
+    difference = abs(float(real_score) - float(fake_score))
+
+    if difference < UNCERTAIN_MARGIN:
+        label = "UNCERTAIN"
+    elif fake_score > real_score:
+        label = "FAKE"
+    else:
+        label = "REAL"
+
+    return label
+
 
 def predict_image(image):
+    model = load_model()
+
     image = image.convert("RGB")
-    tensor = transform(image).unsqueeze(0)
+    tensor = image_transform(image).unsqueeze(0)
 
     with torch.no_grad():
         output = model(tensor)
@@ -105,174 +102,115 @@ def predict_image(image):
         if isinstance(output, (tuple, list)):
             output = output[0]
 
-        output = output.reshape(-1)
-
         if output.numel() == 1:
-            fake_score = torch.sigmoid(output[0]).item()
+            fake_score = torch.sigmoid(output).item()
             real_score = 1.0 - fake_score
         else:
-            scores = torch.softmax(output, dim=0)
-            fake_score = float(scores[FAKE_INDEX].item())
-            real_score = float(scores[REAL_INDEX].item())
+            probabilities = F.softmax(output, dim=1)[0]
+            fake_score = probabilities[FAKE_INDEX].item()
+            real_score = probabilities[REAL_INDEX].item()
 
-    if abs(real_score - fake_score) < UNCERTAIN_MARGIN:
-        verdict = "UNCERTAIN"
-    elif fake_score > real_score:
-        verdict = "FAKE"
-    else:
-        verdict = "REAL"
+    label = classify_scores(real_score, fake_score)
 
     return {
-        "verdict": verdict,
-        "real_score": real_score,
-        "fake_score": fake_score
+        "label": label,
+        "real_score": round(real_score * 100, 2),
+        "fake_score": round(fake_score * 100, 2)
     }
 
 
-def file_hash(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def show_result(result):
-    verdict = result["verdict"]
-
-    if verdict == "FAKE":
-        st.error("Verdict: FAKE")
-    elif verdict == "REAL":
-        st.success("Verdict: REAL")
-    else:
-        st.warning("Verdict: UNCERTAIN")
-
-    col1, col2 = st.columns(2)
-
-    col1.metric(
-        "REAL score",
-        f'{result["real_score"] * 100:.2f}%'
-    )
-    col2.metric(
-        "FAKE score",
-        f'{result["fake_score"] * 100:.2f}%'
-    )
-
-    st.caption(
-        "Scores are model outputs, not guaranteed calibrated "
-        "probabilities or proof of authenticity."
-    )
-
-
-# =========================================================
-# AUDIO MODEL — LOAD ONLY WHEN NEEDED
-# =========================================================
+# ---------------- AUDIO MODEL ----------------
 
 @st.cache_resource
 def load_audio_model():
-    token = st.secrets.get("HF_TOKEN")
+    token = st.secrets.get("HF_TOKEN", None)
 
-    # The repository is public now, so a token is optional.
-    # If one is configured, use it.
-    model_file = hf_hub_download(
+    model_path = hf_hub_download(
         repo_id=AUDIO_REPO_ID,
         filename=AUDIO_MODEL_FILENAME,
-        token=token if token else None
+        token=token
     )
 
-    session_options = ort.SessionOptions()
-    session_options.intra_op_num_threads = 2
-    session_options.inter_op_num_threads = 1
-
-    return ort.InferenceSession(
-        model_file,
-        sess_options=session_options,
+    session = ort.InferenceSession(
+        model_path,
         providers=["CPUExecutionProvider"]
     )
 
+    return session
+
 
 def predict_audio_file(audio_path):
+    session = load_audio_model()
+
     audio, _ = librosa.load(
         audio_path,
         sr=AUDIO_SAMPLE_RATE,
         mono=True
     )
 
-    if audio.size == 0:
-        raise ValueError("No audio samples were found.")
+    if len(audio) == 0:
+        raise ValueError("The audio file is empty.")
 
-    duration = len(audio) / AUDIO_SAMPLE_RATE
-
-    # This model input uses only the first 3 seconds.
-    if len(audio) > AUDIO_MAX_LENGTH:
-        audio = audio[:AUDIO_MAX_LENGTH]
-    elif len(audio) < AUDIO_MAX_LENGTH:
+    if len(audio) < AUDIO_MAX_LENGTH:
         audio = np.pad(
             audio,
             (0, AUDIO_MAX_LENGTH - len(audio))
         )
+    else:
+        audio = audio[:AUDIO_MAX_LENGTH]
 
-    audio = (
-        audio - np.mean(audio)
-    ) / np.sqrt(np.var(audio) + 1e-5)
+    audio = audio.astype(np.float32)
 
-    audio = audio.astype(np.float32).reshape(
-        1, AUDIO_MAX_LENGTH
+    # Match the normalization used by the existing app.
+    audio = (audio - audio.mean()) / (
+        np.sqrt(audio.var() + 1e-5)
     )
 
-    session = load_audio_model()
     input_name = session.get_inputs()[0].name
+    input_shape = session.get_inputs()[0].shape
+
+    model_input = audio
+
+    # Adapt the input dimensions to the ONNX model.
+    if len(input_shape) == 2:
+        model_input = model_input[np.newaxis, :]
+    elif len(input_shape) == 3:
+        model_input = model_input[np.newaxis, np.newaxis, :]
 
     outputs = session.run(
         None,
-        {input_name: audio}
+        {input_name: model_input.astype(np.float32)}
     )
 
-    logits = np.asarray(outputs[0]).reshape(1, -1)
+    logits = np.asarray(outputs[0])
 
-    if logits.shape[1] < 2:
-        raise ValueError(
-            f"Expected two audio classes; got output shape {logits.shape}"
-        )
-
-    shifted = logits - np.max(
-        logits, axis=1, keepdims=True
-    )
-    exp_scores = np.exp(shifted)
-    probs = exp_scores / np.sum(
-        exp_scores, axis=1, keepdims=True
-    )
-
-    if AUDIO_FAKE_INDEX >= probs.shape[1]:
-        raise ValueError(
-            "The configured fake class index does not match model output."
-        )
-
-    fake_score = float(probs[0, AUDIO_FAKE_INDEX])
-    real_score = 1.0 - fake_score
-
-    if abs(real_score - fake_score) < UNCERTAIN_MARGIN:
-        verdict = "UNCERTAIN"
-    elif fake_score > real_score:
-        verdict = "FAKE"
+    if logits.size == 1:
+        fake_score = float(1 / (1 + np.exp(-logits.reshape(-1)[0])))
+        real_score = 1.0 - fake_score
     else:
-        verdict = "REAL"
+        logits = logits.reshape(1, -1)
+        logits = logits - np.max(logits, axis=1, keepdims=True)
+        probabilities = np.exp(logits)
+        probabilities /= probabilities.sum(axis=1, keepdims=True)
+
+        fake_score = float(probabilities[0][AUDIO_FAKE_INDEX])
+        real_index = 1 - AUDIO_FAKE_INDEX
+        real_score = float(probabilities[0][real_index])
 
     return {
-        "verdict": verdict,
-        "real_score": real_score,
-        "fake_score": fake_score,
-        "duration_seconds": round(duration, 2),
-        "analyzed_seconds": min(round(duration, 2), 3.0),
-        "sample_rate": AUDIO_SAMPLE_RATE
+        "label": classify_scores(real_score, fake_score),
+        "real_score": round(real_score * 100, 2),
+        "fake_score": round(fake_score * 100, 2)
     }
 
 
-# =========================================================
-# AUDIO EXTRACTION — HANDLE VIDEOS WITHOUT AUDIO
-# =========================================================
+# ---------------- VIDEO AUDIO EXTRACTION ----------------
 
 def extract_audio_from_video(video_path, audio_path):
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 
     command = [
-        ffmpeg_exe,
+        ffmpeg,
         "-y",
         "-i", video_path,
         "-map", "0:a:0",
@@ -283,513 +221,284 @@ def extract_audio_from_video(video_path, audio_path):
         audio_path
     ]
 
-    completed = subprocess.run(
+    result = subprocess.run(
         command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
+        capture_output=True,
+        text=True,
+        timeout=180
     )
 
-    if completed.returncode != 0:
-        details = (
-            completed.stderr[-1000:]
-            if completed.stderr
-            else "No details available."
+    if result.returncode != 0 or not os.path.exists(audio_path):
+        message = result.stderr[-1200:] if result.stderr else (
+            "No audio stream was found."
         )
+        raise RuntimeError(message)
 
-        if (
-            "matches no streams" in details.lower()
-            or "does not contain any stream" in details.lower()
-            or "stream map" in details.lower()
-        ):
-            raise ValueError(
-                "This video does not appear to contain an audio track."
-            )
-
-        raise RuntimeError(
-            "FFmpeg could not extract the audio track. "
-            + details
-        )
-
-    if (
-        not os.path.exists(audio_path)
-        or os.path.getsize(audio_path) == 0
-    ):
-        raise ValueError(
-            "No usable audio track was extracted from this video."
-        )
+    if os.path.getsize(audio_path) == 0:
+        raise RuntimeError("The extracted audio file is empty.")
 
 
-# =========================================================
-# DOWNLOAD HELPERS
-# =========================================================
+# ---------------- IMAGE TAB ----------------
 
-def csv_bytes(dataframe):
-    return dataframe.to_csv(index=False).encode("utf-8-sig")
-
-
-def excel_bytes(dataframe):
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl"
-    ) as writer:
-        dataframe.to_excel(
-            writer,
-            index=False,
-            sheet_name="Frame Results"
-        )
-
-    output.seek(0)
-    return output.getvalue()
+image_tab, video_tab, audio_tab = st.tabs([
+    "🖼️ Image Detection",
+    "🎬 Video Detection",
+    "🎙️ Audio Detection"
+])
 
 
-# =========================================================
-# APP MODE
-# =========================================================
+with image_tab:
+    st.subheader("Analyze an image")
 
-mode = st.radio(
-    "Choose analysis type",
-    [
-        "Image detection",
-        "Video detection",
-        "Audio detection"
-    ],
-    horizontal=True
-)
-
-
-# =========================================================
-# IMAGE DETECTION
-# =========================================================
-
-if mode == "Image detection":
-
-    uploaded = st.file_uploader(
-        "Upload an image",
-        type=["jpg", "jpeg", "png", "webp"]
+    uploaded_image = st.file_uploader(
+        "Upload JPG, JPEG, or PNG",
+        type=["jpg", "jpeg", "png"],
+        key="image_upload"
     )
 
-    if uploaded is not None:
-        data = uploaded.getvalue()
+    if uploaded_image is not None:
+        image = Image.open(uploaded_image).convert("RGB")
+        st.image(image, caption="Uploaded image", width=400)
 
-        try:
-            image = Image.open(io.BytesIO(data)).convert("RGB")
-            st.image(
-                image,
-                caption="Uploaded image",
-                width="stretch"
-            )
-        except Exception as e:
-            st.error(f"Could not open this image: {e}")
-            st.stop()
-
-        if st.button("Analyze image", type="primary"):
+        if st.button("Analyze image", key="analyze_image"):
             try:
                 with st.spinner("Analyzing image..."):
                     result = predict_image(image)
 
-                show_result(result)
+                st.subheader(f"Result: {result['label']}")
+                st.metric("Fake score", f"{result['fake_score']}%")
+                st.metric("Real score", f"{result['real_score']}%")
 
-                report = {
-                    "file_name": uploaded.name,
-                    "file_sha256": file_hash(data),
-                    "analysis_time_utc": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                    "result": result
-                }
-
-                st.download_button(
-                    "Download forensic report (JSON)",
-                    json.dumps(report, indent=2),
-                    file_name="deeptrace_image_report.json",
-                    mime="application/json"
-                )
-
-            except Exception as e:
-                st.error(f"Image analysis failed: {e}")
+            except Exception as error:
+                st.error(f"Image analysis failed: {error}")
 
 
-# =========================================================
-# VIDEO DETECTION
-# =========================================================
+# ---------------- VIDEO TAB ----------------
 
-elif mode == "Video detection":
+with video_tab:
+    st.subheader("Analyze a video")
 
-    uploaded = st.file_uploader(
-        "Upload a video",
-        type=["mp4", "mov", "avi", "mkv"]
+    uploaded_video = st.file_uploader(
+        "Upload MP4, MOV, or AVI",
+        type=["mp4", "mov", "avi", "mkv"],
+        key="video_upload"
     )
 
-    if uploaded is not None:
-        video_data = uploaded.getvalue()
+    analyze_frames = st.checkbox(
+        "Analyze video frames",
+        value=True
+    )
 
-        st.video(video_data)
+    analyze_video_audio = st.checkbox(
+        "Extract and analyze video's audio",
+        value=False
+    )
 
-        analyze_visual = st.checkbox(
-            "Analyze video frames",
-            value=True
-        )
+    if uploaded_video is not None:
+        st.video(uploaded_video)
 
-        analyze_audio = st.checkbox(
-            "Extract and analyze video's audio track",
-            value=False
-        )
-
-        st.caption(
-            "Tip: Keep audio analysis unchecked for videos without sound. "
-            "You can analyze the video frames independently."
-        )
-
-        if st.button("Analyze video", type="primary"):
-
+        if st.button("Analyze video", key="analyze_video"):
             video_path = None
             audio_path = None
-            reader = None
-            results_df = None
-
-            report = {
-                "file_name": uploaded.name,
-                "file_sha256": file_hash(video_data),
-                "analysis_time_utc": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-                "visual_analysis": None,
-                "audio_analysis": None,
-                "audio_error": None
-            }
 
             try:
-                suffix = (
-                    os.path.splitext(uploaded.name)[1]
-                    or ".mp4"
-                )
-
                 with tempfile.NamedTemporaryFile(
-                    suffix=suffix,
-                    delete=False
-                ) as temp_file:
-                    temp_file.write(video_data)
-                    video_path = temp_file.name
+                    delete=False,
+                    suffix=".mp4"
+                ) as temp_video:
+                    temp_video.write(uploaded_video.getbuffer())
+                    video_path = temp_video.name
 
-                # -----------------------------------------
-                # FRAME ANALYSIS
-                # -----------------------------------------
+                frame_results = []
 
-                if analyze_visual:
-                    rows = []
-
+                if analyze_frames:
                     with st.spinner("Analyzing video frames..."):
-                        reader = imageio.get_reader(
-                            video_path,
-                            format="ffmpeg"
-                        )
+                        reader = imageio.get_reader(video_path)
 
-                        metadata = reader.get_meta_data()
-                        fps = float(metadata.get("fps") or 0)
+                        try:
+                            total_frames = reader.count_frames()
+                        except Exception:
+                            total_frames = MAX_VIDEO_FRAMES * FRAME_INTERVAL
 
-                        for index, frame in enumerate(reader):
+                        frame_indices = list(
+                            range(0, total_frames, FRAME_INTERVAL)
+                        )[:MAX_VIDEO_FRAMES]
 
-                            if index % FRAME_INTERVAL != 0:
-                                continue
+                        for frame_number in frame_indices:
+                            try:
+                                frame = reader.get_data(frame_number)
+                                frame_image = Image.fromarray(
+                                    np.asarray(frame).astype(np.uint8)
+                                ).convert("RGB")
 
-                            if len(rows) >= MAX_VIDEO_FRAMES:
-                                break
+                                prediction = predict_image(frame_image)
 
-                            image = Image.fromarray(
-                                np.asarray(frame).astype(np.uint8)
+                                frame_results.append({
+                                    "Frame": frame_number,
+                                    "Prediction": prediction["label"],
+                                    "Real score (%)": prediction["real_score"],
+                                    "Fake score (%)": prediction["fake_score"]
+                                })
+
+                            except Exception as frame_error:
+                                frame_results.append({
+                                    "Frame": frame_number,
+                                    "Prediction": "ERROR",
+                                    "Real score (%)": None,
+                                    "Fake score (%)": None,
+                                    "Error": str(frame_error)
+                                })
+
+                        reader.close()
+
+                    if frame_results:
+                        results_df = pd.DataFrame(frame_results)
+                        st.subheader("Frame-by-frame results")
+                        st.dataframe(results_df, use_container_width=True)
+
+                        valid_rows = results_df[
+                            results_df["Prediction"].isin(["REAL", "FAKE"])
+                        ]
+
+                        if not valid_rows.empty:
+                            st.info(
+                                "Frame results summarize sampled frames only; "
+                                "they do not establish that the entire video "
+                                "is authentic or manipulated."
                             )
 
-                            result = predict_image(image)
-
-                            timestamp = (
-                                index / fps if fps > 0 else 0.0
-                            )
-
-                            rows.append({
-                                "Frame": index,
-                                "Timestamp (seconds)": round(
-                                    timestamp, 2
-                                ),
-                                "Prediction": result["verdict"],
-                                "REAL score (%)": round(
-                                    result["real_score"] * 100, 2
-                                ),
-                                "FAKE score (%)": round(
-                                    result["fake_score"] * 100, 2
-                                )
-                            })
-
-                    if rows:
-                        results_df = pd.DataFrame(rows)
-
-                        real_average = (
-                            results_df["REAL score (%)"].mean() / 100
-                        )
-                        fake_average = (
-                            results_df["FAKE score (%)"].mean() / 100
-                        )
-
-                        if abs(
-                            real_average - fake_average
-                        ) < UNCERTAIN_MARGIN:
-                            verdict = "UNCERTAIN"
-                        elif fake_average > real_average:
-                            verdict = "FAKE"
-                        else:
-                            verdict = "REAL"
-
-                        st.subheader("Visual analysis result")
-
-                        show_result({
-                            "verdict": verdict,
-                            "real_score": real_average,
-                            "fake_score": fake_average
-                        })
-
-                        st.write(f"Frames analyzed: {len(rows)}")
-                        st.write(f"Video FPS: {fps:.3f}")
-
-                        st.dataframe(
-                            results_df,
-                            width="stretch"
-                        )
-
-                        # CSV download
                         st.download_button(
                             "Download frame results (CSV)",
-                            data=csv_bytes(results_df),
-                            file_name="deeptrace_frame_results.csv",
+                            data=results_df.to_csv(index=False).encode("utf-8"),
+                            file_name="deeptrace_video_results.csv",
                             mime="text/csv"
                         )
 
-                        # Excel download
                         try:
-                            xlsx_data = excel_bytes(results_df)
+                            excel_bytes = None
+                            import io
+
+                            excel_buffer = io.BytesIO()
+                            with pd.ExcelWriter(
+                                excel_buffer,
+                                engine="openpyxl"
+                            ) as writer:
+                                results_df.to_excel(
+                                    writer,
+                                    index=False,
+                                    sheet_name="Frame Results"
+                                )
+
+                            excel_bytes = excel_buffer.getvalue()
 
                             st.download_button(
                                 "Download frame results (Excel)",
-                                data=xlsx_data,
-                                file_name="deeptrace_frame_results.xlsx",
-                                mime=(
-                                    "application/vnd.openxmlformats-officedocument."
-                                    "spreadsheetml.sheet"
-                                )
+                                data=excel_bytes,
+                                file_name="deeptrace_video_results.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
 
-                        except Exception as e:
-                            st.warning(
-                                "Excel export is unavailable. "
-                                "Use the CSV download instead. "
-                                f"Details: {e}"
+                        except Exception:
+                            st.caption(
+                                "Excel export unavailable. CSV download is ready."
                             )
 
-                        report["visual_analysis"] = {
-                            "verdict": verdict,
-                            "average_real_score": real_average,
-                            "average_fake_score": fake_average,
-                            "frame_results": rows
-                        }
-
-                    else:
-                        st.warning(
-                            "No video frames could be analyzed."
-                        )
-
-                # -----------------------------------------
-                # AUDIO ANALYSIS
-                # Audio failure must not erase frame results.
-                # -----------------------------------------
-
-                if analyze_audio:
-                    st.subheader("Audio track analysis")
+                if analyze_video_audio:
+                    st.subheader("Video audio analysis")
+                    audio_path = video_path + ".wav"
 
                     try:
-                        with st.spinner(
-                            "Extracting audio and analyzing it..."
-                        ):
-                            fd, audio_path = tempfile.mkstemp(
-                                suffix=".wav"
-                            )
-                            os.close(fd)
-                            os.remove(audio_path)
-
+                        with st.spinner("Extracting audio from video..."):
                             extract_audio_from_video(
                                 video_path,
                                 audio_path
                             )
 
-                            audio_result = predict_audio_file(
-                                audio_path
-                            )
+                        with st.spinner("Analyzing extracted audio..."):
+                            audio_result = predict_audio_file(audio_path)
 
-                        st.success("Audio track extracted.")
-                        show_result(audio_result)
-
-                        st.write(
-                            "Audio duration: "
-                            f"{audio_result['duration_seconds']} seconds"
+                        st.write(f"Audio result: **{audio_result['label']}**")
+                        st.metric(
+                            "Audio fake score",
+                            f"{audio_result['fake_score']}%"
                         )
-                        st.write(
-                            "Audio analyzed by model: "
-                            f"{audio_result['analyzed_seconds']} seconds"
+                        st.metric(
+                            "Audio real score",
+                            f"{audio_result['real_score']}%"
                         )
-
-                        with open(audio_path, "rb") as audio_file:
-                            st.audio(
-                                audio_file.read(),
-                                format="audio/wav"
-                            )
-
-                        report["audio_analysis"] = audio_result
 
                     except Exception as audio_error:
-                        report["audio_error"] = str(audio_error)
-
                         st.warning(
-                            "Audio analysis could not be completed. "
-                            "Video frame results are still available."
+                            "Video frames were processed independently, "
+                            "but audio analysis failed. The video may have "
+                            "no audio track, or the audio model may have "
+                            "encountered an error."
                         )
-                        st.error(str(audio_error))
-
-                # -----------------------------------------
-                # COMBINED REPORT
-                # -----------------------------------------
-
-                if (
-                    report["visual_analysis"] is not None
-                    or report["audio_analysis"] is not None
-                    or report["audio_error"] is not None
-                ):
-                    st.download_button(
-                        "Download combined forensic report (JSON)",
-                        json.dumps(report, indent=2),
-                        file_name="deeptrace_video_forensic_report.json",
-                        mime="application/json"
-                    )
-
-            except Exception as e:
-                st.error(f"Video analysis failed: {e}")
-
-            finally:
-                if reader is not None:
-                    try:
-                        reader.close()
-                    except Exception:
-                        pass
-
-                for path in (video_path, audio_path):
-                    if path and os.path.exists(path):
-                        try:
-                            os.remove(path)
-                        except Exception:
-                            pass
-
-
-# =========================================================
-# STANDALONE AUDIO DETECTION
-# =========================================================
-
-else:
-
-    st.subheader("🎙️ Audio deepfake detection")
-
-    st.write(
-        "Upload a WAV, FLAC, or MP3 file. "
-        "For audio inside a video, use Video detection."
-    )
-
-    uploaded = st.file_uploader(
-        "Upload an audio file",
-        type=["wav", "flac", "mp3"],
-        key="audio_upload"
-    )
-
-    if uploaded is not None:
-        audio_bytes = uploaded.getvalue()
-
-        st.audio(audio_bytes)
-        st.write(f"File: {uploaded.name}")
-        st.write(f"Size: {len(audio_bytes) / 1024:.1f} KB")
-        st.write(f"SHA-256: `{file_hash(audio_bytes)}`")
-
-        if st.button("Analyze audio", type="primary"):
-
-            audio_path = None
-
-            try:
-                suffix = (
-                    os.path.splitext(uploaded.name)[1]
-                    or ".wav"
-                )
-
-                with tempfile.NamedTemporaryFile(
-                    suffix=suffix,
-                    delete=False
-                ) as temp_file:
-                    temp_file.write(audio_bytes)
-                    audio_path = temp_file.name
-
-                with st.spinner(
-                    "Loading audio model and analyzing audio..."
-                ):
-                    result = predict_audio_file(audio_path)
-
-                show_result(result)
-
-                st.write(
-                    "Audio analyzed by model: "
-                    f"{result['analyzed_seconds']} seconds"
-                )
+                        st.caption(str(audio_error))
 
                 report = {
-                    "file_name": uploaded.name,
-                    "file_sha256": file_hash(audio_bytes),
-                    "analysis_time_utc": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                    "model_repo": AUDIO_REPO_ID,
-                    "result": result,
-                    "disclaimer": (
-                        "AI screening only; not definitive proof "
-                        "of authenticity."
-                    )
+                    "video_filename": uploaded_video.name,
+                    "frame_results": frame_results
                 }
 
                 st.download_button(
-                    "Download audio forensic report (JSON)",
-                    json.dumps(report, indent=2),
-                    file_name="deeptrace_audio_report.json",
+                    "Download JSON report",
+                    data=json.dumps(report, indent=2),
+                    file_name="deeptrace_video_report.json",
                     mime="application/json"
                 )
 
-            except Exception as e:
-                st.error(f"Audio analysis failed: {e}")
+            except Exception as error:
+                st.error(f"Video analysis failed: {error}")
 
-                st.info(
-                    "Check that best_model.onnx exists in the configured "
-                    "Hugging Face repository and that the model can be "
-                    "downloaded. If the app runs out of memory, avoid "
-                    "repeatedly loading the audio model."
-                )
+            finally:
+                for path in [video_path, audio_path]:
+                    if path and os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+
+
+# ---------------- AUDIO TAB ----------------
+
+with audio_tab:
+    st.subheader("Analyze an audio recording")
+
+    uploaded_audio = st.file_uploader(
+        "Upload WAV, MP3, FLAC, or M4A",
+        type=["wav", "mp3", "flac", "m4a"],
+        key="audio_upload"
+    )
+
+    if uploaded_audio is not None:
+        if st.button("Analyze audio", key="analyze_audio"):
+            audio_path = None
+
+            try:
+                suffix = os.path.splitext(uploaded_audio.name)[1] or ".wav"
+
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=suffix
+                ) as temp_audio:
+                    temp_audio.write(uploaded_audio.getbuffer())
+                    audio_path = temp_audio.name
+
+                with st.spinner("Analyzing audio..."):
+                    result = predict_audio_file(audio_path)
+
+                st.subheader(f"Result: {result['label']}")
+                st.metric("Fake score", f"{result['fake_score']}%")
+                st.metric("Real score", f"{result['real_score']}%")
+
+            except Exception as error:
+                st.error(f"Audio analysis failed: {error}")
 
             finally:
                 if audio_path and os.path.exists(audio_path):
                     try:
                         os.remove(audio_path)
-                    except Exception:
+                    except OSError:
                         pass
 
-
-# =========================================================
-# FOOTER
-# =========================================================
-
-st.divider()
-
-st.caption(
-    "DEEP-TRACE is an AI screening tool. Predictions can be wrong "
-    "and should not be treated as definitive proof of authenticity."
-)

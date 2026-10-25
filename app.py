@@ -1,4 +1,5 @@
 
+
 import os
 import io
 import json
@@ -19,29 +20,32 @@ import onnxruntime as ort
 from huggingface_hub import hf_hub_download
 
 
-# =========================================================
-# CONFIG
-# =========================================================
+# =====================================================
+# CONFIGURATION
+# =====================================================
 
 IMAGE_MODEL_PATH = "deeptrace_model_scripted.pt"
+
 AUDIO_REPO_ID = "deeptrace-research/deep-trace-audio"
 AUDIO_MODEL_FILENAME = "best_model.onnx"
 
-# Verify these indices against the models' training labels.
-FAKE_INDEX = 0
-REAL_INDEX = 1
+# These must match the labels used to train your models.
+# Change them ONLY after checking the original training labels.
+IMAGE_FAKE_INDEX = 0
+IMAGE_REAL_INDEX = 1
 AUDIO_FAKE_INDEX = 1
 
 UNCERTAIN_MARGIN = 0.10
 MAX_VIDEO_FRAMES = 10
 FRAME_INTERVAL = 15
+
 SAMPLE_RATE = 16000
-AUDIO_SAMPLES = 48000  # 3 seconds
+AUDIO_SAMPLES = 48000
 
 
-# =========================================================
-# PAGE + NETFLIX FORENSIC THEME
-# =========================================================
+# =====================================================
+# PAGE SETUP
+# =====================================================
 
 st.set_page_config(
     page_title="DEEP-TRACE | Forensic Lab",
@@ -128,39 +132,64 @@ footer {
 """, unsafe_allow_html=True)
 
 st.markdown("""
-<div style="
-    background:linear-gradient(110deg,#21080c,#101012 65%,#1b1b20);
-    border:1px solid #402026;
-    border-left:6px solid #e50914;
-    border-radius:10px;
-    padding:25px;
-    margin-bottom:20px;">
-    <div style="color:#e50914;font-size:12px;font-weight:800;
-                letter-spacing:4px;">
-        DIGITAL FORENSICS • MEDIA INTELLIGENCE
-    </div>
-    <div style="color:white;font-size:38px;font-weight:900;
-                letter-spacing:2px;margin-top:8px;">
-        🔎 DEEP-TRACE
-    </div>
-    <div style="color:#cccccc;font-size:15px;margin-top:8px;">
-        AI-ASSISTED DEEPFAKE INVESTIGATION SYSTEM
-    </div>
-    <div style="color:#888888;font-size:12px;margin-top:14px;
-                letter-spacing:1px;">
-        IMAGE ANALYSIS / VIDEO ANALYSIS / AUDIO ANALYSIS
-    </div>
+<div style="background:linear-gradient(110deg,#21080c,#101012 65%,#1b1b20);
+border:1px solid #402026;border-left:6px solid #e50914;
+border-radius:10px;padding:25px;margin-bottom:20px;">
+<div style="color:#e50914;font-size:12px;font-weight:800;letter-spacing:4px;">
+DIGITAL FORENSICS • MEDIA INTELLIGENCE
 </div>
-<div style="background:#171012;border-left:4px solid #e50914;
-padding:10px 14px;border-radius:5px;color:#d8c8c8;font-size:13px;">
+<div style="color:white;font-size:38px;font-weight:900;letter-spacing:2px;margin-top:8px;">
+🔎 DEEP-TRACE
+</div>
+<div style="color:#cccccc;font-size:15px;margin-top:8px;">
+AI-ASSISTED DEEPFAKE INVESTIGATION SYSTEM
+</div>
+<div style="color:#888888;font-size:12px;margin-top:14px;letter-spacing:1px;">
+IMAGE ANALYSIS / VIDEO ANALYSIS / AUDIO ANALYSIS
+</div>
+</div>
+<div style="background:#171012;border-left:4px solid #e50914;padding:10px 14px;
+border-radius:5px;color:#d8c8c8;font-size:13px;">
 FORENSIC NOTICE: AI predictions are estimates, not conclusive proof.
 </div>
 """, unsafe_allow_html=True)
 
 
-# =========================================================
+# =====================================================
+# PREDICTION HELPERS
+# =====================================================
+
+def classify_scores(real_score, fake_score):
+    """Use a configurable uncertainty margin, not a forced binary result."""
+    if abs(fake_score - real_score) < UNCERTAIN_MARGIN:
+        return "UNCERTAIN"
+    return "FAKE" if fake_score > real_score else "REAL"
+
+
+def prediction_result(real_score, fake_score):
+    return {
+        "label": classify_scores(real_score, fake_score),
+        "real_score": round(float(real_score) * 100, 2),
+        "fake_score": round(float(fake_score) * 100, 2)
+    }
+
+
+def show_prediction(result):
+    if result["label"] == "FAKE":
+        st.error("🔴 Prediction: FAKE")
+    elif result["label"] == "REAL":
+        st.success("🟢 Prediction: REAL")
+    else:
+        st.warning("🟡 Prediction: UNCERTAIN")
+
+    left, right = st.columns(2)
+    left.metric("Fake score", f"{result['fake_score']:.2f}%")
+    right.metric("Real score", f"{result['real_score']:.2f}%")
+
+
+# =====================================================
 # IMAGE MODEL
-# =========================================================
+# =====================================================
 
 @st.cache_resource
 def load_image_model():
@@ -184,12 +213,6 @@ image_transform = transforms.Compose([
 ])
 
 
-def prediction_label(real_score, fake_score):
-    if abs(real_score - fake_score) < UNCERTAIN_MARGIN:
-        return "UNCERTAIN"
-    return "FAKE" if fake_score > real_score else "REAL"
-
-
 def predict_image(image):
     model = load_image_model()
     tensor = image_transform(image.convert("RGB")).unsqueeze(0)
@@ -203,27 +226,29 @@ def predict_image(image):
         output = output.detach().cpu()
 
         if output.numel() == 1:
+            # A one-logit binary classifier requires confirmation of
+            # which class the logit represents.
             fake_score = float(torch.sigmoid(output).item())
             real_score = 1.0 - fake_score
         else:
-            probs = F.softmax(output.reshape(1, -1), dim=1)[0]
+            probabilities = F.softmax(output.reshape(1, -1), dim=1)[0]
 
-            if len(probs) <= max(FAKE_INDEX, REAL_INDEX):
-                raise ValueError("Unexpected image model output shape.")
+            if len(probabilities) <= max(
+                IMAGE_FAKE_INDEX, IMAGE_REAL_INDEX
+            ):
+                raise ValueError(
+                    "Image model output does not match configured class indices."
+                )
 
-            fake_score = float(probs[FAKE_INDEX])
-            real_score = float(probs[REAL_INDEX])
+            fake_score = float(probabilities[IMAGE_FAKE_INDEX])
+            real_score = float(probabilities[IMAGE_REAL_INDEX])
 
-    return {
-        "label": prediction_label(real_score, fake_score),
-        "real_score": round(real_score * 100, 2),
-        "fake_score": round(fake_score * 100, 2)
-    }
+    return prediction_result(real_score, fake_score)
 
 
-# =========================================================
+# =====================================================
 # AUDIO MODEL
-# =========================================================
+# =====================================================
 
 @st.cache_resource
 def load_audio_model():
@@ -277,9 +302,7 @@ def predict_audio_file(audio_path):
     elif len(input_shape) == 3:
         model_input = audio[np.newaxis, np.newaxis, :]
     else:
-        raise ValueError(
-            f"Unsupported ONNX input shape: {input_shape}"
-        )
+        raise ValueError(f"Unsupported ONNX input shape: {input_shape}")
 
     outputs = session.run(
         None,
@@ -299,52 +322,26 @@ def predict_audio_file(audio_path):
         real_score = 1.0 - fake_score
     else:
         values = values.reshape(-1).astype(np.float64)
-        values -= np.max(values)
-        probs = np.exp(values)
-        probs /= probs.sum()
 
-        if len(probs) != 2:
+        if len(values) != 2:
             raise ValueError(
-                f"Expected 2 audio classes; model returned {len(probs)}. "
-                "Check the model's expected output labels."
+                f"Expected two audio classes, got {len(values)}. "
+                "Verify the ONNX model output and preprocessing."
             )
 
-        fake_score = float(probs[AUDIO_FAKE_INDEX])
-        real_score = float(probs[1 - AUDIO_FAKE_INDEX])
+        values -= np.max(values)
+        probabilities = np.exp(values)
+        probabilities /= probabilities.sum()
 
-    return {
-        "label": prediction_label(real_score, fake_score),
-        "real_score": round(real_score * 100, 2),
-        "fake_score": round(fake_score * 100, 2)
-    }
+        fake_score = float(probabilities[AUDIO_FAKE_INDEX])
+        real_score = float(probabilities[1 - AUDIO_FAKE_INDEX])
 
-
-# =========================================================
-# SHARED RESULT DISPLAY
-# =========================================================
-
-def show_prediction(result):
-    label = result["label"]
-
-    if label == "FAKE":
-        st.error("🔴 Prediction: FAKE")
-    elif label == "REAL":
-        st.success("🟢 Prediction: REAL")
-    else:
-        st.warning("🟡 Prediction: UNCERTAIN")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.metric("Fake score", f"{result['fake_score']:.2f}%")
-
-    with col2:
-        st.metric("Real score", f"{result['real_score']:.2f}%")
+    return prediction_result(real_score, fake_score)
 
 
-# =========================================================
+# =====================================================
 # VIDEO HELPERS
-# =========================================================
+# =====================================================
 
 def extract_audio_from_video(video_path, audio_path):
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
@@ -369,11 +366,11 @@ def extract_audio_from_video(video_path, audio_path):
 
     if result.returncode != 0 or not os.path.exists(audio_path):
         raise RuntimeError(
-            "No readable audio track found. This video may have no sound."
+            "No readable audio track found. The video may have no sound."
         )
 
     if os.path.getsize(audio_path) == 0:
-        raise RuntimeError("The extracted audio track is empty.")
+        raise RuntimeError("Extracted audio is empty.")
 
 
 def analyze_video_frames(video_path, progress):
@@ -383,13 +380,13 @@ def analyze_video_frames(video_path, progress):
     try:
         try:
             total_frames = reader.count_frames()
-            indices = list(
+            frame_indices = list(
                 range(0, total_frames, FRAME_INTERVAL)
             )[:MAX_VIDEO_FRAMES]
         except Exception:
-            indices = list(range(MAX_VIDEO_FRAMES))
+            frame_indices = list(range(MAX_VIDEO_FRAMES))
 
-        for position, frame_number in enumerate(indices):
+        for position, frame_number in enumerate(frame_indices):
             try:
                 frame = reader.get_data(frame_number)
                 frame_image = Image.fromarray(
@@ -415,7 +412,7 @@ def analyze_video_frames(video_path, progress):
                 })
 
             progress.progress(
-                min((position + 1) / max(len(indices), 1), 1.0)
+                min((position + 1) / max(len(frame_indices), 1), 1.0)
             )
 
     finally:
@@ -445,12 +442,12 @@ def show_frame_downloads(df):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     except Exception:
-        st.caption("Excel export unavailable. CSV is available.")
+        st.caption("Excel export unavailable; CSV is available.")
 
 
-# =========================================================
+# =====================================================
 # TABS
-# =========================================================
+# =====================================================
 
 image_tab, video_tab, audio_tab = st.tabs([
     "🖼️ IMAGE FORENSICS",
@@ -459,10 +456,7 @@ image_tab, video_tab, audio_tab = st.tabs([
 ])
 
 
-# =========================================================
 # IMAGE TAB
-# =========================================================
-
 with image_tab:
     st.subheader("Image authenticity analysis")
 
@@ -486,10 +480,7 @@ with image_tab:
             st.error(f"Image analysis failed: {error}")
 
 
-# =========================================================
 # VIDEO TAB
-# =========================================================
-
 with video_tab:
     st.subheader("Video authenticity analysis")
 
@@ -520,53 +511,42 @@ with video_tab:
                 suffix = os.path.splitext(uploaded_video.name)[1] or ".mp4"
 
                 with tempfile.NamedTemporaryFile(
-                    delete=False,
-                    suffix=suffix
+                    delete=False, suffix=suffix
                 ) as temp_video:
                     temp_video.write(uploaded_video.getbuffer())
                     video_path = temp_video.name
 
                 if analyze_frames:
-                    st.write("**Frame-by-frame analysis**")
                     progress = st.progress(0)
 
                     with st.spinner("Analyzing sampled frames..."):
                         df = analyze_video_frames(video_path, progress)
 
                     progress.empty()
+                    st.subheader("Frame-by-frame results")
+                    st.dataframe(df, use_container_width=True)
 
-                    if df.empty:
-                        st.warning("No video frames could be analyzed.")
-                    else:
-                        st.dataframe(df, use_container_width=True)
+                    valid = df[df["Prediction"].isin(["REAL", "FAKE"])]
 
-                        valid = df[df["Prediction"].isin(["REAL", "FAKE"])]
+                    left, right = st.columns(2)
+                    left.metric(
+                        "Frames labelled fake",
+                        int((valid["Prediction"] == "FAKE").sum())
+                    )
+                    right.metric(
+                        "Frames labelled real",
+                        int((valid["Prediction"] == "REAL").sum())
+                    )
 
-                        col1, col2 = st.columns(2)
-
-                        with col1:
-                            st.metric(
-                                "Frames labelled fake",
-                                int((valid["Prediction"] == "FAKE").sum())
-                            )
-
-                        with col2:
-                            st.metric(
-                                "Frames labelled real",
-                                int((valid["Prediction"] == "REAL").sum())
-                            )
-
-                        show_frame_downloads(df)
+                    show_frame_downloads(df)
 
                 if analyze_video_audio:
                     st.subheader("🎙️ Audio track analysis")
                     audio_path = video_path + ".wav"
 
                     try:
-                        with st.spinner("Extracting audio from video..."):
+                        with st.spinner("Extracting video audio..."):
                             extract_audio_from_video(video_path, audio_path)
-
-                        st.success("Audio extracted. Running detection...")
 
                         with st.spinner("Analyzing audio..."):
                             audio_result = predict_audio_file(audio_path)
@@ -577,16 +557,18 @@ with video_tab:
                         st.error("Audio analysis could not be completed.")
                         st.code(str(audio_error))
                         st.info(
-                            "The video may not contain audio. Frame analysis "
-                            "can still work. Try a separate WAV or MP3 in "
-                            "the Audio Forensics tab."
+                            "If the clip has no audio track, upload a "
+                            "separate recording in the Audio Forensics tab."
                         )
 
                 st.download_button(
                     "⬇ Download JSON report",
                     data=json.dumps({
                         "video_filename": uploaded_video.name,
-                        "note": "Sampled frame predictions are not proof of authenticity."
+                        "note": (
+                            "Predictions cover sampled frames only and "
+                            "are not conclusive proof of authenticity."
+                        )
                     }, indent=2),
                     file_name="deeptrace_report.json",
                     mime="application/json"
@@ -604,10 +586,7 @@ with video_tab:
                             pass
 
 
-# =========================================================
 # AUDIO TAB
-# =========================================================
-
 with audio_tab:
     st.subheader("Audio authenticity analysis")
 
@@ -627,8 +606,7 @@ with audio_tab:
                 suffix = os.path.splitext(uploaded_audio.name)[1] or ".wav"
 
                 with tempfile.NamedTemporaryFile(
-                    delete=False,
-                    suffix=suffix
+                    delete=False, suffix=suffix
                 ) as temp_audio:
                     temp_audio.write(uploaded_audio.getbuffer())
                     audio_path = temp_audio.name
@@ -637,11 +615,6 @@ with audio_tab:
                     result = predict_audio_file(audio_path)
 
                 show_prediction(result)
-
-                st.caption(
-                    "The model analyzes a three-second audio segment. "
-                    "Confirm its class mapping before relying on predictions."
-                )
 
             except Exception as error:
                 st.error(f"Audio analysis failed: {error}")
@@ -655,10 +628,7 @@ with audio_tab:
                         pass
 
 
-# =========================================================
 # FOOTER
-# =========================================================
-
 st.markdown("""
 <hr>
 <div style="text-align:center;color:#777;font-size:12px;padding:12px;">

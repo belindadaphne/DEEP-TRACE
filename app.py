@@ -635,3 +635,128 @@ st.markdown("""
 DEEP-TRACE • DIGITAL FORENSICS LAB • AI-ASSISTED MEDIA ANALYSIS
 </div>
 """, unsafe_allow_html=True)
+
+# ================= ADMIN DASHBOARD =================
+
+import os
+import json
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+from datetime import datetime
+
+ADMIN_PASSWORD = st.secrets.get(
+    "ADMIN_PASSWORD",
+    os.environ.get("ADMIN_PASSWORD", "DeepTrace@123")
+)
+
+HISTORY_FILE = "analysis_history.json"
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_history(data):
+    history = load_history()
+    history.append(data)
+
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=4)
+
+def admin_dashboard():
+    st.markdown("# 🔐 DEEP-TRACE ADMIN")
+    st.caption("Administrator Control Panel")
+
+    if "admin_logged_in" not in st.session_state:
+        st.session_state.admin_logged_in = False
+
+    if not st.session_state.admin_logged_in:
+        st.subheader("Admin Login")
+
+        password = st.text_input("Enter Admin Password", type="password")
+
+        if st.button("Login"):
+            if password == ADMIN_PASSWORD:
+                st.session_state.admin_logged_in = True
+                st.rerun()
+            else:
+                st.error("Incorrect password")
+
+        return
+
+    if st.button("Logout"):
+        st.session_state.admin_logged_in = False
+        st.rerun()
+
+    history = load_history()
+    df = pd.DataFrame(history)
+
+    total = len(df)
+
+    st.subheader("📊 Dashboard Overview")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Analyses", total)
+
+    if total:
+        c2.metric("REAL Predictions",
+                  int((df["prediction"] == "REAL").sum()))
+        c3.metric("FAKE Predictions",
+                  int((df["prediction"] == "FAKE").sum()))
+    else:
+        c2.metric("REAL Predictions", 0)
+        c3.metric("FAKE Predictions", 0)
+
+    if not df.empty:
+        st.subheader("📈 Media Analysis Statistics")
+
+        if "media_type" in df.columns:
+            media_counts = df["media_type"].value_counts().reset_index()
+            media_counts.columns = ["Media Type", "Count"]
+
+            fig = px.bar(
+                media_counts,
+                x="Media Type",
+                y="Count",
+                title="Analyses by Media Type"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        if "prediction" in df.columns:
+            prediction_counts = df["prediction"].value_counts().reset_index()
+            prediction_counts.columns = ["Prediction", "Count"]
+
+            fig = px.pie(
+                prediction_counts,
+                names="Prediction",
+                values="Count",
+                title="REAL vs FAKE Predictions"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("📁 Analysis History")
+        st.dataframe(df, use_container_width=True)
+
+        st.download_button(
+            "⬇️ Download Analysis Report",
+            df.to_csv(index=False),
+            "deeptrace_admin_report.csv",
+            "text/csv"
+        )
+
+    else:
+        st.info("No analysis records available yet.")
+
+# Add admin page to Streamlit navigation
+page = st.sidebar.selectbox(
+    "Navigation",
+    ["Detection System", "Admin Dashboard"]
+)
+
+if page == "Admin Dashboard":
+    admin_dashboard()
